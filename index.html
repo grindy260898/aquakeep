@@ -1,0 +1,2431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#0B1114" />
+<!-- iOS / Android installable-app bar & splash behaviors -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="AquaKeep" />
+<meta name="mobile-web-app-capable" content="yes" />
+<title>AquaKeep — Universal Aquarium Ecosystem</title>
+<!--
+  ============================================================
+  AquaKeep — offline-first, PWA-ready, single-file build.
+  Architecture:
+    1. CSS design system  — glassmorphic neo-tropical dark theme
+    2. Layout             — app shell, nav rail, module panels
+    3. State engine       — reactive Store (pub/sub) + localStorage
+                            persistence + cloud sync queue
+    4. Math engines       — health state machine, dosing math,
+                            botanical decay, adaptive scheduler,
+                            colorimetric normalization
+    5. UI components      — render functions bound to Store
+  To ship as a PWA: serve this file, add manifest.json and the
+  service worker stub at the bottom (sw registration included).
+  ============================================================
+-->
+<style>
+/* ============ 1. DESIGN TOKENS ============ */
+:root {
+  --canvas: #0B1114;
+  --glass: rgba(255, 255, 255, 0.03);
+  --glass-strong: rgba(255, 255, 255, 0.06);
+  --border-hi: rgba(255, 255, 255, 0.10);
+  --ink: #E8F1F2;
+  --ink-dim: #8FA6AD;
+  --ink-faint: #55686F;
+  /* Dynamic accent — mutated by the health state machine */
+  --accent: #00E676;
+  --accent-soft: rgba(0, 230, 118, 0.14);
+  --radius: 18px;
+  --radius-sm: 12px;
+  --font: "Inter", "SF Pro Display", -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Health-state accent mutation (class set on <body> by the state machine) */
+body.state-critical  { --accent: #FF4A4A; --accent-soft: rgba(255, 74, 74, 0.16); }
+body.state-equilibrium { --accent: #00E676; --accent-soft: rgba(0, 230, 118, 0.14); }
+body.state-botanical { --accent: #FFA000; --accent-soft: rgba(255, 160, 0, 0.15); }
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+html, body { height: 100%; }
+body {
+  background:
+    radial-gradient(1200px 600px at 85% -10%, var(--accent-soft), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(0, 120, 160, 0.10), transparent 55%),
+    var(--canvas);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.55;
+  transition: background 1.2s ease;
+  overflow-x: hidden;
+}
+
+/* ============ 2. GLASS PANEL SYSTEM ============ */
+.glass {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(15px);
+  backdrop-filter: blur(15px);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255,255,255,0.05);
+}
+.panel { padding: 20px; margin-bottom: 16px; position: relative; overflow: hidden; }
+.panel h2 {
+  font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-dim); margin-bottom: 14px; display: flex; align-items: center; gap: 8px;
+}
+.panel h2::before { content: ""; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+
+/* ============ 3. APP SHELL ============ */
+#app { max-width: 1180px; margin: 0 auto; padding: 18px 16px 110px; }
+
+header.appbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 20px; margin-bottom: 18px;
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand .logo {
+  width: 40px; height: 40px; border-radius: 14px; display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent-soft), transparent);
+  border: 1px solid var(--border-hi); font-size: 20px;
+  box-shadow: 0 0 18px var(--accent-soft);
+}
+.brand h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.02em; }
+.brand small { display: block; color: var(--ink-faint); font-size: 11px; letter-spacing: 0.1em; }
+
+.status-cluster { display: flex; gap: 10px; align-items: center; }
+.pill {
+  padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--border-hi); background: var(--glass-strong);
+  display: flex; gap: 7px; align-items: center; white-space: nowrap;
+}
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 10px var(--accent); }
+#healthPill { color: var(--accent); border-color: var(--accent-soft); }
+body.state-critical #healthPill .dot { animation: pulse 0.9s infinite; }
+@keyframes pulse { 50% { opacity: 0.25; transform: scale(1.5); } }
+
+/* ============ 4. NAV RAIL (bottom, thumb-reach mobile) ============ */
+nav.rail {
+  position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 4px; padding: 8px; z-index: 60; border-radius: 24px;
+}
+nav.rail button {
+  border: none; background: transparent; color: var(--ink-dim);
+  font-family: var(--font); font-size: 11px; font-weight: 600;
+  padding: 9px 13px; border-radius: 16px; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  transition: all 0.25s ease;
+}
+nav.rail button .ico { font-size: 18px; }
+nav.rail button.active {
+  color: var(--accent); background: var(--accent-soft);
+  box-shadow: 0 0 20px var(--accent-soft);
+}
+
+/* ============ 5. DASHBOARD GRID ============ */
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); }
+.col-4 { grid-column: span 4; } .col-6 { grid-column: span 6; }
+.col-8 { grid-column: span 8; } .col-12 { grid-column: span 12; }
+@media (max-width: 860px) { .col-4, .col-6, .col-8 { grid-column: span 12; } }
+
+.metric { text-align: center; padding: 14px 8px; border-radius: var(--radius-sm);
+  background: var(--glass); border: 1px solid transparent; transition: border 0.3s; }
+.metric.alert { border-color: #FF4A4A; box-shadow: 0 0 14px rgba(255,74,74,0.25); }
+.metric .val { font-size: 26px; font-weight: 700; color: var(--accent); }
+.metric .val.bad { color: #FF4A4A; }
+.metric .lbl { font-size: 11px; color: var(--ink-faint); letter-spacing: 0.08em; text-transform: uppercase; }
+.metric-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px; }
+
+/* ============ 6. CONTROLS ============ */
+.slider-row { display: grid; grid-template-columns: 130px 1fr 74px; gap: 12px;
+  align-items: center; padding: 9px 0; border-bottom: 1px dashed rgba(255,255,255,0.05); }
+.slider-row label { font-size: 13px; color: var(--ink-dim); }
+.slider-row output { font-variant-numeric: tabular-nums; font-weight: 700;
+  font-size: 14px; text-align: right; color: var(--accent); }
+input[type="range"] { -webkit-appearance: none; width: 100%; height: 4px; border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent) var(--fill, 0%), rgba(255,255,255,0.10) var(--fill, 0%));
+  outline: none; }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--ink); border: 3px solid var(--accent);
+  box-shadow: 0 0 12px var(--accent-soft); cursor: pointer; }
+
+button.btn {
+  font-family: var(--font); font-weight: 700; font-size: 13px; cursor: pointer;
+  padding: 12px 18px; border-radius: 14px; border: 1px solid var(--border-hi);
+  background: var(--glass-strong); color: var(--ink); transition: all 0.2s;
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+}
+button.btn:hover { border-color: var(--accent); box-shadow: 0 0 16px var(--accent-soft); }
+button.btn.primary { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+button.btn.danger { color: #FF4A4A; border-color: rgba(255,74,74,0.5); background: rgba(255,74,74,0.08); }
+button.btn:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; }
+
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600;
+  padding: 4px 10px; border-radius: 999px; background: var(--glass-strong);
+  border: 1px solid var(--border-hi); color: var(--ink-dim); margin: 2px; }
+.chip.hot { color: var(--accent); border-color: var(--accent-soft); }
+
+/* ============ 7. CRITICAL GLOBAL BLOCKER OVERLAY ============ */
+#blocker {
+  position: fixed; inset: 0; z-index: 100; display: none;
+  place-items: center; padding: 24px;
+  background: rgba(11, 17, 20, 0.82);
+  -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
+}
+#blocker.show { display: grid; }
+#blocker .card {
+  max-width: 460px; width: 100%; padding: 30px; text-align: center;
+  border: 2px solid #FF4A4A; border-radius: 24px; background: rgba(30, 8, 8, 0.65);
+  animation: blockerFlash 1.1s ease-in-out infinite;
+}
+@keyframes blockerFlash {
+  0%, 100% { box-shadow: 0 0 30px rgba(255, 74, 74, 0.5); }
+  50% { box-shadow: 0 0 80px rgba(255, 74, 74, 0.95); }
+}
+#blocker h3 { color: #FF4A4A; font-size: 20px; letter-spacing: 0.05em; margin-bottom: 10px; }
+#blocker .wc { font-size: 42px; font-weight: 800; color: #FF4A4A; margin: 12px 0 2px; }
+
+/* ============ 8. DIET ROTATION WHEEL ============ */
+.wheel-wrap { display: flex; gap: 22px; align-items: center; flex-wrap: wrap; }
+.wheel { position: relative; width: 190px; height: 190px; border-radius: 50%; flex: 0 0 auto;
+  transition: transform 0.9s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.wheel .seg { position: absolute; inset: 0; border-radius: 50%; }
+.wheel-hub { position: absolute; inset: 27%; border-radius: 50%; display: grid; place-items: center;
+  text-align: center; font-size: 11px; font-weight: 700; z-index: 2; padding: 8px; }
+.wheel-pointer { position: absolute; top: -8px; left: 50%; transform: translateX(-50%);
+  color: var(--accent); font-size: 18px; z-index: 3; text-shadow: 0 0 10px var(--accent); }
+
+/* ============ 9. BOTANICAL DECAY TRACKER ============ */
+.leaf-item { display: flex; align-items: center; gap: 14px; padding: 12px;
+  border-radius: var(--radius-sm); background: var(--glass); margin-bottom: 10px;
+  border-left: 3px solid var(--leafcolor, var(--ink-faint)); }
+.leaf-item .bar { flex: 1; height: 6px; border-radius: 6px; background: rgba(255,255,255,0.07); overflow: hidden; }
+.leaf-item .bar i { display: block; height: 100%; background: var(--leafcolor, var(--accent));
+  border-radius: 6px; transition: width 0.6s ease; }
+.leaf-item .phase { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; color: var(--leafcolor, var(--ink-dim)); }
+
+/* ============ 10. TIMELINE / SCHEDULER ============ */
+.tl-item { display: flex; gap: 14px; padding: 11px 0; border-bottom: 1px dashed rgba(255,255,255,0.06); }
+.tl-item .when { flex: 0 0 92px; font-size: 11px; font-weight: 700; color: var(--ink-faint);
+  text-transform: uppercase; letter-spacing: 0.06em; padding-top: 2px; }
+.tl-item .what strong { font-size: 13.5px; display: block; }
+.tl-item .what span { font-size: 12px; color: var(--ink-dim); }
+.tl-item.warn .what strong { color: #FFA000; }
+.tl-item.hidden-phase { opacity: 0.28; filter: grayscale(1); }
+
+/* ============ 11. VISION ANALYZER ============ */
+.vision-stage { position: relative; border-radius: var(--radius-sm); overflow: hidden;
+  background: #060a0c; aspect-ratio: 16/9; display: grid; grid-template-columns: 1fr 1fr; }
+.vframe { position: relative; margin: 7%; border-radius: 10px; }
+.vframe.chart { border: 2px dashed rgba(0, 230, 118, 0.6); }
+.vframe.tube  { border: 2px dashed rgba(255, 160, 0, 0.7); }
+.vframe .tag { position: absolute; top: -1px; left: -1px; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em; padding: 3px 8px; border-radius: 0 0 8px 0;
+  background: rgba(0,0,0,0.6); color: var(--ink-dim); }
+.vframe .scanline { position: absolute; left: 0; right: 0; height: 2px; background: var(--accent);
+  box-shadow: 0 0 14px var(--accent); animation: scan 2.4s linear infinite; opacity: 0.8; }
+@keyframes scan { 0% { top: 4%; } 50% { top: 94%; } 100% { top: 4%; } }
+.swatch-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.swatch { width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--border-hi);
+  display: grid; place-items: end center; font-size: 9px; font-weight: 700; padding-bottom: 3px;
+  color: rgba(255,255,255,0.85); text-shadow: 0 1px 2px #000; }
+
+/* ============ 12. IOT / STREAM ============ */
+.stream-box { position: relative; aspect-ratio: 16/9; border-radius: var(--radius-sm);
+  overflow: hidden; background: repeating-linear-gradient(45deg, #071013, #071013 12px, #081417 12px, #081417 24px); }
+.stream-box .live { position: absolute; top: 10px; left: 10px; }
+.stream-box video { width: 100%; height: 100%; object-fit: cover; }
+.watt-meter { font-size: 30px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.watt-meter.dead { color: #FF4A4A; animation: pulse 0.8s infinite; }
+
+/* ============ 12b. SETTINGS, TRENDS & RELEASE-2 WIDGETS ============ */
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.field label { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--ink-faint); display: block; margin-bottom: 5px; }
+.inp { width: 100%; font-family: var(--font); font-size: 13.5px; color: var(--ink);
+  padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border-hi);
+  background: var(--glass-strong); outline: none;
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+.inp:focus { border-color: var(--accent); box-shadow: 0 0 12px var(--accent-soft); }
+select.inp option { background: #0d1518; }
+.live-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border-radius: 12px; background: var(--glass); margin-bottom: 8px; border: 1px solid transparent; }
+.live-row:hover { border-color: var(--border-hi); }
+.live-row .x { margin-left: auto; padding: 7px 11px; }
+
+/* iOS-style maintenance switch */
+.switch { position: relative; width: 46px; height: 26px; flex: 0 0 auto; cursor: pointer; display: inline-block; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch i { position: absolute; inset: 0; border-radius: 999px; font-style: normal;
+  background: rgba(255,255,255,0.10); border: 1px solid var(--border-hi); transition: 0.25s; }
+.switch i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--ink-dim); transition: 0.25s; }
+.switch input:checked + i { background: var(--accent-soft); border-color: var(--accent); }
+.switch input:checked + i::after { transform: translateX(20px); background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+
+/* Trend analyzer */
+.tabbar { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+.tabbar button { font-family: var(--font); font-size: 11.5px; font-weight: 700; letter-spacing: 0.05em;
+  padding: 7px 14px; border-radius: 999px; cursor: pointer; border: 1px solid var(--border-hi);
+  background: transparent; color: var(--ink-dim); transition: 0.2s; }
+.tabbar button.on { color: var(--accent); border-color: var(--accent);
+  background: var(--accent-soft); box-shadow: 0 0 14px var(--accent-soft); }
+#trendSvg { width: 100%; height: 220px; display: block; }
+#trendSvg .line { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linejoin: round;
+  stroke-linecap: round; filter: drop-shadow(0 0 6px var(--accent)); }
+#trendSvg .dot { fill: var(--ink); stroke: var(--accent); stroke-width: 2; filter: drop-shadow(0 0 4px var(--accent)); }
+#trendSvg text { fill: var(--ink-faint); font-size: 9px; font-family: var(--font); }
+#trendSvg .gridline { stroke: rgba(255,255,255,0.06); stroke-width: 1; }
+
+/* Banners */
+.banner { border-radius: 14px; padding: 14px 16px; font-size: 13px; font-weight: 600;
+  margin: 12px 0; border: 1px solid; line-height: 1.5; }
+.banner.danger { color: #FF7A7A; border-color: rgba(255,74,74,0.55); background: rgba(255,74,74,0.08);
+  animation: blockerFlash 1.2s ease-in-out infinite; }
+.banner.warn { color: #FFC04D; border-color: rgba(255,160,0,0.5); background: rgba(255,160,0,0.07); }
+.banner.ok { color: var(--accent); border-color: var(--accent-soft); background: var(--accent-soft); }
+
+/* Gestation progress */
+.gest { padding: 12px; border-radius: 12px; background: var(--glass); margin-bottom: 10px; }
+.gest .bar { height: 8px; border-radius: 8px; background: rgba(255,255,255,0.08); overflow: hidden; margin-top: 8px; }
+.gest .bar i { display: block; height: 100%; border-radius: 8px;
+  background: linear-gradient(90deg, var(--accent), #4FC3F7);
+  box-shadow: 0 0 10px var(--accent-soft); transition: width 0.5s; }
+
+/* Pest triage */
+.sym-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 12px; }
+.sym { padding: 12px; border-radius: 14px; cursor: pointer; border: 1px solid var(--border-hi);
+  background: var(--glass); font-size: 12.5px; font-weight: 600; color: var(--ink-dim); transition: 0.2s; }
+.sym.on { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 14px var(--accent-soft); }
+.diag-card { border-radius: 14px; padding: 16px; background: var(--glass);
+  border-left: 3px solid var(--accent); margin-top: 12px; }
+.diag-card h4 { font-size: 14px; margin-bottom: 4px; }
+.diag-card .risk { color: #FF7A7A; font-size: 12.5px; margin-bottom: 8px; }
+.diag-card ol { margin-left: 18px; font-size: 12.5px; color: var(--ink-dim); }
+.diag-card ol li { margin-bottom: 4px; }
+
+/* RAG (red/amber/green) status strip — three-tier at-a-glance state */
+.rag-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rag-lamp { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 800;
+  letter-spacing: 0.07em; padding: 8px 14px; border-radius: 999px;
+  border: 1px solid var(--border-hi); color: var(--ink-faint); opacity: 0.45; transition: 0.3s; }
+.rag-lamp .lamp { width: 12px; height: 12px; border-radius: 50%; background: currentColor; opacity: 0.5; }
+.rag-lamp.lit { opacity: 1; }
+.rag-lamp.lit .lamp { opacity: 1; animation: ragPulse 1.6s ease-in-out infinite; }
+@keyframes ragPulse { 50% { box-shadow: 0 0 0 6px transparent; opacity: 0.55; } }
+#ragRed.lit   { color: #FF4A4A; border-color: #FF4A4A; background: rgba(255,74,74,0.10); box-shadow: 0 0 22px rgba(255,74,74,0.35); }
+#ragAmber.lit { color: #FFA000; border-color: #FFA000; background: rgba(255,160,0,0.10); box-shadow: 0 0 22px rgba(255,160,0,0.35); }
+#ragGreen.lit { color: #00E676; border-color: #00E676; background: rgba(0,230,118,0.10); box-shadow: 0 0 22px rgba(0,230,118,0.35); }
+/* Metric tiles pick up the three-tier scheme too */
+.metric.ok   { border-color: rgba(0,230,118,0.35); }
+.metric.ok .val { color: #00E676; }
+.metric.warn { border-color: rgba(255,160,0,0.55); box-shadow: 0 0 12px rgba(255,160,0,0.18); }
+.metric.warn .val { color: #FFA000; }
+
+/* ============ 12c. PRIMARY NAVIGATION (release 5) ============ */
+/* Sticky header — always visible on desktop, no hamburger (best practice #2/#15) */
+header.appbar { position: sticky; top: 8px; z-index: 70; flex-direction: column;
+  align-items: stretch; gap: 10px; }
+.appbar-row { display: flex; align-items: center; gap: 14px; justify-content: space-between; flex-wrap: wrap; }
+.appbar-row.sub { padding-top: 8px; border-top: 1px dashed rgba(255,255,255,0.06); }
+a.brand { text-decoration: none; color: inherit; }
+/* Semantic top nav: <nav><ul><li> with aria-current (best practice #11) */
+.topnav ul { display: flex; gap: 2px; list-style: none; flex-wrap: wrap; margin: 0; padding: 0; }
+.topnav li { position: relative; }
+.topnav button { font-family: var(--font); font-size: 12.5px; font-weight: 600; color: var(--ink-dim);
+  background: transparent; border: none; padding: 9px 12px; border-radius: 10px; cursor: pointer;
+  transition: 0.2s; white-space: nowrap; }
+.topnav button:hover { color: var(--ink); background: var(--glass-strong); }
+.topnav button.active, .topnav button[aria-current="page"] {
+  color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 14px var(--accent-soft); }
+/* Grouped dropdown (best practice #5) — opens on hover AND keyboard focus */
+.navgroup .dropdown { display: none; position: absolute; top: 100%; left: 0; min-width: 240px;
+  list-style: none; margin: 0; padding: 8px; z-index: 80; border-radius: 14px;
+  background: rgba(13, 21, 24, 0.97); border: 1px solid var(--border-hi);
+  box-shadow: 0 14px 34px rgba(0,0,0,0.5); }
+.navgroup:hover .dropdown, .navgroup:focus-within .dropdown { display: block; }
+.navgroup .dropdown button { width: 100%; text-align: left; }
+/* CTA top-right in contrasting accent (best practice #3) */
+.cta { white-space: nowrap; }
+/* Breadcrumbs (best practice #7) */
+.crumbs { font-size: 12px; color: var(--ink-faint); }
+.crumbs a { color: var(--accent); text-decoration: none; }
+.crumbs a:hover { text-decoration: underline; }
+/* Desktop shows the top nav; the thumb-reach tab bar is mobile-only (best practice #13) */
+@media (min-width: 961px) { nav.rail { display: none; } }
+@media (max-width: 960px) { .topnav, .cta { display: none; } }
+nav.rail ul { display: flex; gap: 4px; list-style: none; margin: 0; padding: 0; }
+
+/* Recommendation rows (replaces the tinder deck) */
+.rec-row { display: flex; align-items: center; gap: 14px; padding: 12px;
+  border-radius: 14px; background: var(--glass); margin-bottom: 10px; border: 1px solid transparent; }
+.rec-row:hover { border-color: var(--border-hi); }
+.rec-score { flex: 0 0 62px; text-align: center; font-size: 20px; font-weight: 800;
+  padding: 10px 0; border-radius: 12px; }
+.rec-score.s-hi  { color: #00E676; background: rgba(0,230,118,0.10); }
+.rec-score.s-mid { color: #FFA000; background: rgba(255,160,0,0.10); }
+.rec-score.s-lo  { color: #FF4A4A; background: rgba(255,74,74,0.10); }
+.rec-row .why { font-size: 11.5px; color: var(--ink-faint); }
+
+/* Match (tinder) deck */
+.match-card { max-width: 430px; margin: 0 auto; padding: 24px; border-radius: 22px;
+  background: var(--glass-strong); border: 1px solid var(--border-hi); text-align: center;
+  -webkit-backdrop-filter: blur(15px); backdrop-filter: blur(15px);
+  box-shadow: 0 14px 40px rgba(0,0,0,0.45); animation: rise 0.3s ease; }
+.match-card .emo { font-size: 46px; }
+.match-card h3 { font-size: 17px; margin: 6px 0 2px; }
+.match-card .cat { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); }
+.score-big { font-size: 46px; font-weight: 800; margin: 10px 0 2px; }
+.score-big.s-hi { color: #00E676; text-shadow: 0 0 22px rgba(0,230,118,0.5); }
+.score-big.s-mid { color: #FFA000; text-shadow: 0 0 22px rgba(255,160,0,0.5); }
+.score-big.s-lo { color: #FF4A4A; text-shadow: 0 0 22px rgba(255,74,74,0.5); }
+.match-card ul { list-style: none; margin-top: 10px; text-align: left; }
+.match-card ul li { font-size: 12px; color: var(--ink-dim); padding: 4px 0;
+  border-bottom: 1px dashed rgba(255,255,255,0.06); }
+.match-card ul li::before { content: "· "; color: var(--accent); }
+
+/* Flora library */
+.plant-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-top: 14px; }
+.plant-card { padding: 14px; border-radius: 14px; background: var(--glass); border: 1px solid var(--border-hi);
+  display: flex; flex-direction: column; gap: 8px; }
+.plant-card h4 { font-size: 13.5px; }
+.plant-card .badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.plant-card .b { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; padding: 3px 8px;
+  border-radius: 999px; background: var(--glass-strong); border: 1px solid var(--border-hi); color: var(--ink-dim); }
+.plant-card .b.light-High { color: #FFA000; border-color: rgba(255,160,0,0.4); }
+.plant-card .b.co2-Yes { color: #4FC3F7; border-color: rgba(79,195,247,0.4); }
+.plant-card .b.diff-Hard { color: #FF7A7A; border-color: rgba(255,74,74,0.4); }
+.plant-card p { font-size: 11.5px; color: var(--ink-dim); flex: 1; }
+.plant-card button { align-self: flex-start; padding: 8px 13px; }
+#plantCanvas { width: 100%; height: 100%; grid-column: 1 / -1; cursor: crosshair; display: block; }
+
+/* Live vision canvas */
+#visCanvas { width: 100%; height: 100%; grid-column: 1 / -1; cursor: crosshair; display: block; }
+.file-btn { display: inline-flex; align-items: center; gap: 8px; }
+.file-btn input { display: none; }
+
+/* ============ 13. UTILITIES ============ */
+.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.spread { justify-content: space-between; }
+.muted { color: var(--ink-dim); font-size: 12.5px; }
+.faint { color: var(--ink-faint); font-size: 11.5px; }
+.mt { margin-top: 14px; } .mb { margin-bottom: 12px; }
+.view { display: none; animation: rise 0.35s ease; }
+.view.active { display: block; }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+#toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%) translateY(-80px);
+  z-index: 120; padding: 12px 20px; border-radius: 14px; font-size: 13px; font-weight: 600;
+  transition: transform 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.3); max-width: 92vw; }
+#toast.show { transform: translateX(-50%) translateY(0); }
+code.k { background: var(--glass-strong); border: 1px solid var(--border-hi);
+  padding: 1px 7px; border-radius: 7px; font-size: 12px; color: var(--accent); }
+</style>
+</head>
+<body class="state-equilibrium">
+<div id="app">
+
+  <!-- ======== STICKY APP BAR — logo left, primary nav centre, CTA right ======== -->
+  <header class="appbar glass">
+    <div class="appbar-row">
+      <a class="brand" href="#" data-nav="dashboard" aria-label="AquaKeep — back to tank dashboard">
+        <div class="logo">🌿</div>
+        <div>
+          <h1>AquaKeep</h1>
+          <small>UNIVERSAL AQUARIUM ECOSYSTEM</small>
+        </div>
+      </a>
+      <nav class="topnav" aria-label="Primary">
+        <ul>
+          <li><button data-nav="dashboard" aria-current="page">Tank Dashboard</button></li>
+          <li><button data-nav="vision">Test-Tube Scanner</button></li>
+          <li><button data-nav="dosing">Water Log & Dosing</button></li>
+          <li><button data-nav="feeding">Feeding & Botanicals</button></li>
+          <li class="navgroup">
+            <button aria-haspopup="true" aria-expanded="false">Plants & Stocking ▾</button>
+            <ul class="dropdown">
+              <li><button data-nav="flora">Plant Library & Leaf Doctor</button></li>
+              <li><button data-nav="match">Stocking Recommendations</button></li>
+            </ul>
+          </li>
+          <li><button data-nav="schedule">Maintenance Schedule</button></li>
+          <li><button data-nav="iot">Tank Camera & Alerts</button></li>
+        </ul>
+      </nav>
+      <button class="btn primary cta" data-nav="dosing">🧪 Log Water Test</button>
+    </div>
+    <div class="appbar-row sub">
+      <div class="crumbs" id="crumbs" aria-label="Breadcrumb">Home</div>
+      <div class="status-cluster">
+        <label class="pill" style="cursor:pointer" title="Mute smart-plug hardware alarms for 30 minutes while your hands are in the tank">
+          <span>🧤</span><span id="maintLabel">MAINT OFF</span>
+          <span class="switch"><input type="checkbox" id="maintSwitch"><i></i></span>
+        </label>
+        <button class="pill" id="btnExport" style="cursor:pointer;font-family:var(--font);color:var(--ink)" title="Download the full local state as a .json backup">💾 Export</button>
+        <div class="pill" id="syncPill"><span class="dot"></span><span id="syncLabel">OFFLINE · CACHED</span></div>
+        <div class="pill" id="healthPill"><span class="dot"></span><span id="healthLabel">EQUILIBRIUM</span></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ======== VIEW: DASHBOARD ======== -->
+  <section class="view active" data-view="dashboard">
+    <div class="grid">
+      <div class="panel glass col-12" id="ragPanel" style="padding:14px 20px">
+        <div class="rag-strip">
+          <div class="rag-lamp" id="ragRed"><span class="lamp"></span>RED — TOXIC / HARDWARE</div>
+          <div class="rag-lamp" id="ragAmber"><span class="lamp"></span>AMBER — DRIFT / BOTANICAL</div>
+          <div class="rag-lamp" id="ragGreen"><span class="lamp"></span>GREEN — EQUILIBRIUM</div>
+          <div style="flex:1"></div>
+          <div id="ragSummary" class="muted"></div>
+        </div>
+      </div>
+      <div class="panel glass col-8">
+        <h2>Tank Instance — <span id="tankName" style="color:var(--ink)">…</span></h2>
+        <div class="metric-row" id="metricRow"></div>
+        <div id="shockBanner"></div>
+        <div class="mt row spread">
+          <div class="muted" id="tankMeta"></div>
+          <div class="row">
+            <button class="btn" id="btnAdvanceDay" title="Demo: simulate one day passing">⏩ Simulate +1 Day</button>
+            <button class="btn primary" data-nav="dosing">Log Parameters</button>
+          </div>
+        </div>
+      </div>
+      <div class="panel glass col-4">
+        <h2>Livestock & Flora</h2>
+        <div id="bioChips"></div>
+        <p class="faint mt">Sensitivity ceiling drives alert thresholds: <code class="k" id="sensCeil"></code></p>
+        <button class="btn mt" id="btnBerried">🥚 Log Berried Female</button>
+      </div>
+
+      <!-- Ecosystem Trend Analyzer -->
+      <div class="panel glass col-8">
+        <h2>Ecosystem Trend Analyzer</h2>
+        <div class="tabbar" id="trendTabs"></div>
+        <svg id="trendSvg" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"></svg>
+        <p class="faint" id="trendEmpty"></p>
+      </div>
+
+      <!-- Substrate Exhaustion Forecast -->
+      <div class="panel glass col-4">
+        <h2>Substrate Buffering Status</h2>
+        <div id="substrateWidget"></div>
+      </div>
+
+      <!-- Caridina Gestation Predictor -->
+      <div class="panel glass col-12">
+        <h2>Gestation & Shrimplet Survival Predictor</h2>
+        <div id="gestList"></div>
+      </div>
+
+      <!-- Tank Settings & Customizer -->
+      <div class="panel glass col-12">
+        <h2>Tank Settings & Customizer</h2>
+        <div class="form-grid">
+          <div class="field"><label>Tank name</label><input class="inp" id="setName" type="text"></div>
+          <div class="field"><label>Net volume (L)</label><input class="inp" id="setVol" type="number" min="1" step="0.5"></div>
+          <div class="field"><label>Substrate profile</label>
+            <select class="inp" id="setSub">
+              <option>Active Soil</option><option>Inert Sand</option><option>Gravel</option><option>Bare Bottom</option>
+            </select>
+          </div>
+          <div class="field"><label>Filter type</label><input class="inp" id="setFilter" type="text"></div>
+          <div class="field"><label>Flow rate (L/h)</label><input class="inp" id="setFlow" type="number" min="0" step="10"></div>
+        </div>
+        <hr style="border:none;border-top:1px dashed rgba(255,255,255,0.08);margin:18px 0">
+        <h2>Livestock Configurator</h2>
+        <div id="livestockRows"></div>
+        <div class="row mt">
+          <input class="inp" id="speciesSearch" placeholder="Filter 190+ species & morphs…" style="max-width:250px">
+          <select class="inp" id="addSpecies" style="max-width:330px"></select>
+          <input class="inp" id="addCount" type="number" value="10" min="1" style="width:90px">
+          <button class="btn primary" id="btnAddSpecies">+ Add Species</button>
+        </div>
+        <p class="faint mt">Live parameter envelope — intersection of every resident profile (most restrictive wins):</p>
+        <div id="envPreview"></div>
+        <hr style="border:none;border-top:1px dashed rgba(255,255,255,0.08);margin:18px 0">
+        <h2>Flora Configurator — plants in this tank</h2>
+        <div id="floraRows"></div>
+        <p class="faint">Add plants from the 🌿 Flora tab library or the 🔥 Match deck.</p>
+        <div class="row mt">
+          <button class="btn" id="btnDownloadSW">⬇ Download sw.js — PWA offline shell</button>
+          <span class="faint">Place beside AquaKeep.html and serve over HTTPS to install as an app.</span>
+        </div>
+      </div>
+
+      <div class="panel glass col-12">
+        <h2>Adaptive Maintenance Timeline</h2>
+        <div id="dashTimeline"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======== VIEW: MODULE 1 — AI VISION ANALYZER ======== -->
+  <section class="view" data-view="vision">
+    <div class="panel glass">
+      <h2>Module 1 — AI Vision Test-Tube Analyzer</h2>
+      <p class="muted mb">Place the manufacturer chart (left) and the liquid tube (right) on a <strong>plain white surface</strong>. Ambient white-balance is normalized against the background before hue extraction.</p>
+      <div class="vision-stage glass">
+        <canvas id="visCanvas" width="1280" height="720"></canvas>
+      </div>
+      <div class="row mt spread">
+        <div class="row">
+          <label class="btn primary file-btn">📸 Take Photo
+            <input type="file" id="visFileCam" accept="image/*" capture="environment">
+          </label>
+          <label class="btn file-btn">🖼 Upload Photo
+            <input type="file" id="visFileLib" accept="image/*">
+          </label>
+        </div>
+        <span class="faint" id="visHint">Shoot on a plain white surface, then click the chart swatch, then the tube liquid.</span>
+      </div>
+      <div id="visConfirm"></div>
+      <div class="row mt spread">
+        <div class="row">
+          <label class="muted">Reagent:</label>
+          <select id="reagentSel" class="btn" style="padding:9px 12px">
+            <option value="ammonia">Ammonia NH₃</option>
+            <option value="nitrite">Nitrite NO₂</option>
+            <option value="nitrate">Nitrate NO₃</option>
+            <option value="ph">pH Broad Range</option>
+          </select>
+        </div>
+        <div class="row">
+          <button class="btn" id="btnCapture">🧪 Simulate Capture</button>
+          <button class="btn primary" id="btnAnalyze" disabled>📸 Analyze Samples</button>
+        </div>
+      </div>
+      <div class="swatch-row" id="swatchRow"></div>
+      <pre class="glass mt" id="visionPayload" style="padding:14px;font-size:11.5px;overflow:auto;color:var(--ink-dim);max-height:230px"></pre>
+    </div>
+  </section>
+
+  <!-- ======== VIEW: MODULE 2 — DOSING / PARAMETER LOG ======== -->
+  <section class="view" data-view="dosing">
+    <div class="panel glass">
+      <h2>Module 2 — Parameter Logging & Dosing Engine</h2>
+      <div id="sliderStack"></div>
+      <div class="row mt spread" style="align-items:flex-end">
+        <div class="row" style="align-items:flex-end">
+          <div class="field"><label>EC µS/cm — optional</label>
+            <input class="inp" id="ecInput" type="number" min="0" step="1" placeholder="e.g. 210" style="width:130px"></div>
+          <div class="field"><label>k = TDS ÷ EC</label>
+            <div class="watt-meter" id="kReadout" style="font-size:24px">—</div></div>
+        </div>
+        <button class="btn primary" id="btnCommitLog">Commit Reading →</button>
+      </div>
+      <p class="faint mt">Healthy remineralized Caridina water holds k between 0.55 and 0.70. Drift above 0.75 signals non-beneficial ionic buildup.</p>
+    </div>
+    <div class="panel glass">
+      <h2>Water Replacement Tasks</h2>
+      <div class="row" style="align-items:flex-end">
+        <div class="field"><label>Bucket volume (L)</label>
+          <input class="inp" id="bucketVol" type="number" value="11.6" min="0.5" step="0.5" style="width:120px"></div>
+        <button class="btn primary" id="btnLogWC">💧 Log Routine Water Change</button>
+        <button class="btn" id="btnLogTopoff">☁ Log Top-off for Evaporation</button>
+      </div>
+      <div id="doseBanner"></div>
+    </div>
+    <div class="panel glass">
+      <h2>Dosing Recommendations</h2>
+      <div id="doseAdvice" class="muted">Commit a reading to generate additive guidance.</div>
+    </div>
+  </section>
+
+  <!-- ======== VIEW: MODULE 3 — FEEDING & BOTANICALS ======== -->
+  <section class="view" data-view="feeding">
+    <div class="panel glass">
+      <h2>Module 3 — Shrimp Diet Rotation Wheel</h2>
+      <div class="wheel-wrap">
+        <div style="position:relative">
+          <div class="wheel-pointer">▼</div>
+          <div class="wheel glass" id="dietWheel"><div class="wheel-hub glass" id="wheelHub"></div></div>
+        </div>
+        <div style="flex:1;min-width:220px">
+          <div id="dietToday"></div>
+          <div class="mt" id="dietWeek"></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel glass">
+      <h2>Botanical Decay Lifecycle</h2>
+      <div class="row mb">
+        <button class="btn primary" id="btnAddLeaf">+ Added Nano Catappa Leaf</button>
+        <span class="faint">Starts a 14-day background decay tracker.</span>
+      </div>
+      <div id="leafList"></div>
+    </div>
+  </section>
+
+  <!-- ======== VIEW: FLORA LIBRARY & PLANT DOCTOR ======== -->
+  <section class="view" data-view="flora">
+    <div class="panel glass">
+      <h2>Flora Library — care card per species</h2>
+      <input class="inp" id="plantSearch" placeholder="Search plants… (name, placement, light, difficulty)">
+      <div class="plant-grid" id="plantGrid"></div>
+    </div>
+    <div class="panel glass">
+      <h2>Plant Photo Scanner — deficiency & symptom diagnoser</h2>
+      <div class="vision-stage glass">
+        <canvas id="plantCanvas" width="1280" height="720"></canvas>
+      </div>
+      <div class="row mt spread">
+        <label class="btn primary file-btn">📷 Scan Leaf Photo
+          <input type="file" id="plantFile" accept="image/*" capture="camera">
+        </label>
+        <span class="faint" id="plantHint">Load a photo, then click the worst-looking leaf tissue to colour-sample it.</span>
+      </div>
+      <div id="leafVerdict"></div>
+      <p class="muted mt" style="margin-bottom:0">Visible symptoms — toggle everything that matches:</p>
+      <div class="sym-grid" id="plantSymGrid"></div>
+      <div id="plantDiagCards"></div>
+    </div>
+  </section>
+
+  <!-- ======== VIEW: STOCKING RECOMMENDATIONS ======== -->
+  <section class="view" data-view="match">
+    <div class="panel glass">
+      <h2>Livestock recommendations — ranked for <span id="recVol" style="color:var(--ink)"></span></h2>
+      <p class="muted mb">Scored against your tank volume, live water readings and current residents. Species needing a bigger tank are excluded automatically.</p>
+      <div id="recLive"></div>
+      <div class="row mt"><button class="btn" id="btnMoreLive">Show more livestock</button></div>
+    </div>
+    <div class="panel glass">
+      <h2>Plant recommendations — ranked for your lighting, CO₂ & substrate</h2>
+      <div id="recPlant"></div>
+      <div class="row mt"><button class="btn" id="btnMorePlant">Show more plants</button></div>
+    </div>
+  </section>
+
+  <!-- ======== VIEW: MODULE 4 — SCHEDULER ======== -->
+  <section class="view" data-view="schedule">
+    <div class="panel glass">
+      <h2>Module 4 — Adaptive Maintenance Lifecycle</h2>
+      <div class="row spread mb">
+        <div>
+          <span class="muted">Tank age:</span>
+          <span id="tankAge" style="font-weight:800;color:var(--accent)"></span>
+          <span class="chip" id="phaseChip"></span>
+        </div>
+        <span class="faint">Phase 1 suppresses fertilizer schedules during the nitrogen cycle.</span>
+      </div>
+      <div id="schedList"></div>
+    </div>
+  </section>
+
+  <!-- ======== VIEW: MODULE 5 — IOT & AI DIAGNOSTICS ======== -->
+  <section class="view" data-view="iot">
+    <div class="grid">
+      <div class="panel glass col-8">
+        <h2>Module 5 — Live Tank Stream (RTSP → H.264)</h2>
+        <div class="stream-box" id="streamBox">
+          <video id="rtspVideo" muted playsinline autoplay style="display:none"></video>
+          <img id="mjpegView" alt="camera stream" style="display:none;width:100%;height:100%;object-fit:cover">
+          <div id="streamPlaceholder" style="position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:22px">
+            <div>
+              <div style="font-size:36px">📷</div>
+              <strong>Tapo C210 · "living room cam"</strong>
+              <p class="muted">192.168.4.82 · fw 1.5.3 · RTSP ready</p>
+              <p class="faint" style="max-width:420px">No browser-playable stream connected yet. Browsers can't decode
+              raw RTSP — run <strong>go2rtc</strong> or <strong>MediaMTX</strong> on any always-on device pointing at
+              <code class="k">rtsp://user:pass@192.168.4.82:554/stream1</code>, then paste its HTTP output below.</p>
+            </div>
+          </div>
+          <span class="chip hot live" id="streamChip"><span class="dot" style="width:6px;height:6px;border-radius:50%;background:var(--accent)"></span> C210 · rtsp://192.168.4.82:554/stream1</span>
+        </div>
+        <div class="row mt" style="align-items:flex-end">
+          <div class="field" style="flex:1;min-width:230px"><label>Gateway stream URL (mp4 / m3u8 / mjpeg)</label>
+            <input class="inp" id="streamUrl" placeholder="http://127.0.0.1:1984/api/stream.mp4?src=tank"></div>
+          <button class="btn primary" id="btnConnectCam">Connect</button>
+          <button class="btn" id="btnDisconnectCam">Disconnect</button>
+          <span class="faint" style="flex-basis:100%">Ran setup-camera.sh? Leave the field empty and hit Connect — the localhost gateway default is used automatically.</span>
+        </div>
+        <div class="row mt">
+          <button class="btn primary" id="btnAIVision">🧠 AI Cloud Vision Assessment</button>
+          <span class="faint">Snapshot → vision LLM → tissue & livestock health report</span>
+        </div>
+        <p class="muted mt" style="margin-bottom:0">Visible symptoms — toggle everything you can see:</p>
+        <div class="sym-grid" id="symGrid"></div>
+        <div id="diagCards"></div>
+        <pre class="glass mt" id="aiReport" style="padding:14px;font-size:11.5px;overflow:auto;color:var(--ink-dim);max-height:250px;display:none"></pre>
+      </div>
+      <div class="panel glass col-4">
+        <h2>Smart Hardware Listener</h2>
+        <p class="muted">Filtration smart plug — live draw</p>
+        <div class="watt-meter" id="wattMeter">— W</div>
+        <p class="faint" id="wattNote"></p>
+        <div class="mt row">
+          <button class="btn danger" id="btnSimFail">Simulate 0W Failure</button>
+          <button class="btn" id="btnSimRestore">Restore</button>
+        </div>
+        <hr style="border:none;border-top:1px dashed rgba(255,255,255,0.08);margin:16px 0">
+        <p class="muted mb">Photoperiod plug schedule</p>
+        <div id="plugSched" class="faint"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- ======== GLOBAL CRITICAL BLOCKER ======== -->
+<div id="blocker">
+  <div class="card">
+    <h3>⚠ TOXIC CYCLE EVENT</h3>
+    <p class="muted" id="blockerReason"></p>
+    <div class="wc" id="blockerWC"></div>
+    <p class="faint">IMMEDIATE WATER CHANGE VOLUME (50%)</p>
+    <p class="muted mt">Livestock onboarding is <strong style="color:#FF4A4A">LOCKED</strong> until Ammonia and Nitrite read 0.00 ppm.</p>
+    <button class="btn danger mt" id="btnAckBlocker">Acknowledge — Begin Water Change</button>
+  </div>
+</div>
+
+<div id="toast" class="glass"></div>
+
+<!-- ======== MOBILE TAB BAR (same labels/order as desktop nav for consistency) ======== -->
+<nav class="rail glass" aria-label="Primary mobile">
+  <ul>
+    <li><button data-nav="dashboard" class="active" aria-current="page"><span class="ico">◈</span>Dashboard</button></li>
+    <li><button data-nav="vision"><span class="ico">👁</span>Scanner</button></li>
+    <li><button data-nav="dosing"><span class="ico">🧪</span>Water Log</button></li>
+    <li><button data-nav="feeding"><span class="ico">🦐</span>Feeding</button></li>
+    <li><button data-nav="flora"><span class="ico">🌿</span>Plants</button></li>
+    <li><button data-nav="match"><span class="ico">⭐</span>Stocking</button></li>
+    <li><button data-nav="schedule"><span class="ico">🗓</span>Schedule</button></li>
+    <li><button data-nav="iot"><span class="ico">📡</span>Camera</button></li>
+  </ul>
+</nav>
+
+<script>
+"use strict";
+/* ================================================================
+   PART A — REACTIVE STATE ENGINE (offline-first, pub/sub)
+   ================================================================ */
+const Store = (() => {
+  const KEY = "aquakeep.v1";
+  let state = migrate(load() ?? seed());
+  const subs = new Map(); // topic -> Set<fn>
+
+  function seed() {
+    return {
+      // -------- POLYMORPHIC UNIVERSAL DATA SCHEMA --------
+      universal_tank_instance: {
+        id: crypto.randomUUID(),
+        display_name: "Crystal Cove 58L",
+        created_at: Date.now() - 86400000 * 12, // demo: 12-day-old tank
+        dimensions: { volume_litres: 58, depth_cm: 30 },
+        substrate_matrix: {
+          base_layer: "Active Soil",
+          cap_layer: "Slate Chips",
+          leach_profile: "High_Ammonia_Low_pH",
+          added_at: Date.now() - 86400000 * 12   // soil age clock for the exhaustion forecast
+        },
+        hardware_tier: {
+          lighting: { type: "Low-Tech LED", par_output: "Low", photoperiod_hours: 7, smart_plug_integrated: true },
+          co2_injection: false,
+          filtration: { type: "Canister", brand: "Eheim Ecco 2234", turnover_lph: 500,
+            media: ["Coarse Foam", "Ceramic Biological Rings", "Fine Floss"] }
+        },
+        livestock_array: [
+          { species: "Caridina cf. cantonensis (Crystal Red Shrimp)", count: 20, type: "Invertebrate", sensitivity: "Extreme", profile: "caridina" },
+          { species: "Ramshorn Snail", count: 5, type: "Invertebrate", sensitivity: "Low", profile: "snail" }
+        ],
+        flora_array: [
+          { name: "Rotala Blood Red", feeding_type: "Water Column Heavy", tissue_culture: true },
+          { name: "Echinodorus Reni", feeding_type: "Root Feeder Heavy", pot_form: true },
+          { name: "Java Moss", feeding_type: "Water Column Light", attached_to: "Driftwood" },
+          { name: "Anubias Nana Petite", feeding_type: "Water Column Light", attached_to: "Driftwood" },
+          { name: "Marsilea hirsuta", feeding_type: "Substrate Runner", tissue_culture: true }
+        ]
+      },
+      readings: [],              // committed parameter logs
+      current: { ph: 6.4, ammonia: 0, nitrite: 0, nitrate: 5, gh: 5, kh: 1, tds: 130, temp: 22.5, ec: null },
+      botanicals: [],            // active decay trackers
+      berried: [],               // gestation trackers
+      events: [],                // water changes / top-offs
+      shock: null,               // osmotic strain hold window
+      maintenanceUntil: 0,       // hardware alarm mute deadline (real clock)
+      trendTab: "tds",           // active chart tab
+      dayOffset: 0,              // demo time-warp (days)
+      matchLikes: { live: [], plant: [] }, // 🔥 Match shortlist
+      hardware: { filterWatts: 11.2, failed: false, streamUrl: "" },
+      blockerAck: false,
+      syncQueue: []              // ops awaiting cloud flush
+    };
+  }
+  function load() { try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; } }
+  /** Schema migration — back-fills fields added in later releases so old caches stay valid. */
+  function migrate(s) {
+    if (!s) return s;
+    const t = s.universal_tank_instance;
+    t.substrate_matrix.added_at ??= t.created_at;
+    t.livestock_array.forEach(l => l.profile ??= guessProfile(l.species));
+    s.berried ??= []; s.events ??= []; s.shock ??= null;
+    s.maintenanceUntil ??= 0; s.trendTab ??= "tds"; s.current.ec ??= null;
+    s.matchLikes ??= { live: [], plant: [] }; s.hardware.streamUrl ??= "";
+    return s;
+  }
+  function guessProfile(sp) {
+    sp = sp.toLowerCase();
+    if (sp.includes("caridina") || sp.includes("crystal")) return "caridina";
+    if (sp.includes("neocaridina") || sp.includes("cherry")) return "neocaridina";
+    if (sp.includes("snail")) return "snail";
+    return "community";
+  }
+  function persist() { localStorage.setItem(KEY, JSON.stringify(state)); queueSync(); }
+  function queueSync() {
+    state.syncQueue.push({ op: "upsert", at: Date.now() });
+    // Cloud flush: fires when the browser reports connectivity.
+    if (navigator.onLine) { state.syncQueue = []; setSync("SYNCED · CLOUD"); }
+    else setSync("OFFLINE · CACHED (" + state.syncQueue.length + " queued)");
+  }
+  function setSync(txt) { const el = document.getElementById("syncLabel"); if (el) el.textContent = txt; }
+
+  return {
+    get: () => state,
+    tank: () => state.universal_tank_instance,
+    /** Mutate state via a pure-ish patch fn, then persist + notify. */
+    commit(topic, fn) { fn(state); persist(); (subs.get(topic) ?? []).forEach(f => f(state)); (subs.get("*") ?? []).forEach(f => f(state)); },
+    on(topic, fn) { if (!subs.has(topic)) subs.set(topic, new Set()); subs.get(topic).add(fn); },
+    /** Simulated "now" honoring the demo day-warp. */
+    now: () => Date.now() + state.dayOffset * 86400000
+  };
+})();
+window.addEventListener("online",  () => Store.commit("sync", () => {}));
+window.addEventListener("offline", () => Store.commit("sync", () => {}));
+
+/* ================================================================
+   PART B — MATHEMATICAL & PREDICTIVE ENGINES
+   ================================================================ */
+
+/** B1. Health state machine — mutates the global accent glow. */
+const HealthEngine = {
+  evaluate(s) {
+    const c = s.current;
+    if (c.ammonia > 0 || c.nitrite > 0 || (s.hardware.failed && !MaintenanceMode.active(s))) return "CRITICAL_ALERT";
+    const activeLeaves = s.botanicals.filter(b => LeafEngine.phase(b).key !== "DONE").length;
+    if (activeLeaves >= 2) return "BOTANICAL";
+    const t = Targets.forTank(Store.tank());
+    const ok = c.ph >= t.ph[0] && c.ph <= t.ph[1] && c.gh >= t.gh[0] && c.gh <= t.gh[1]
+            && c.tds >= t.tds[0] && c.tds <= t.tds[1] && c.nitrate <= t.nitrateMax;
+    return ok ? "EQUILIBRIUM" : "BOTANICAL"; // drifting-but-safe renders warm amber
+  },
+  apply(stateName) {
+    document.body.className = { CRITICAL_ALERT: "state-critical", EQUILIBRIUM: "state-equilibrium", BOTANICAL: "state-botanical" }[stateName];
+    const label = document.getElementById("healthLabel");
+    label.textContent = { CRITICAL_ALERT: "CRITICAL ALERT", EQUILIBRIUM: "EQUILIBRIUM", BOTANICAL: "BOTANICAL DRIFT" }[stateName];
+  }
+};
+
+/** B2. Livestock-aware parameter targets (polymorphic — reads the instance). */
+const Targets = {
+  /** Livestock profile library — every species maps to a water envelope. */
+  PROFILES: {
+    caridina:    { label: "Caridina · soft acidic",     sensitivity: "Extreme", ph: [5.8, 6.6], gh: [4, 6],   kh: [0, 2],  tds: [100, 160], tempC: [21, 23.5], nitrateMax: 10 },
+    neocaridina: { label: "Neocaridina · hard water",   sensitivity: "High",    ph: [6.8, 7.8], gh: [6, 12],  kh: [2, 6],  tds: [150, 250], tempC: [20, 26],   nitrateMax: 20 },
+    community:   { label: "Tropical community fish",    sensitivity: "Medium",  ph: [6.4, 7.6], gh: [4, 12],  kh: [1, 6],  tds: [100, 300], tempC: [23, 27],   nitrateMax: 25 },
+    snail:       { label: "Snails",                     sensitivity: "Low",     ph: [6.8, 8.0], gh: [6, 15],  kh: [2, 8],  tds: [120, 350], tempC: [20, 27],   nitrateMax: 30 },
+    blackwater:  { label: "Blackwater · very soft",     sensitivity: "High",    ph: [4.5, 6.2], gh: [0, 4],   kh: [0, 1],  tds: [30, 100],  tempC: [24, 28],   nitrateMax: 10 },
+    discus:      { label: "Discus · warm soft",         sensitivity: "High",    ph: [5.5, 6.8], gh: [1, 6],   kh: [0, 3],  tds: [50, 150],  tempC: [27, 30],   nitrateMax: 10 },
+    betta:       { label: "Betta / labyrinth",          sensitivity: "Medium",  ph: [6.0, 7.5], gh: [3, 8],   kh: [1, 5],  tds: [80, 250],  tempC: [24, 28],   nitrateMax: 20 },
+    livebearer:  { label: "Livebearer · hard alkaline", sensitivity: "Low",     ph: [7.0, 8.2], gh: [10, 20], kh: [4, 10], tds: [200, 400], tempC: [22, 27],   nitrateMax: 30 },
+    rift:        { label: "Rift-lake cichlid",          sensitivity: "Medium",  ph: [7.6, 8.6], gh: [10, 20], kh: [8, 15], tds: [250, 450], tempC: [24, 27],   nitrateMax: 30 },
+    sulawesi:    { label: "Sulawesi · warm alkaline",   sensitivity: "Extreme", ph: [7.8, 8.4], gh: [6, 9],   kh: [3, 6],  tds: [150, 220], tempC: [27, 29],   nitrateMax: 10 }
+  },
+  /** Envelope = intersection of every resident profile — most restrictive wins.
+      Recalculates live whenever the livestock_array mutates. */
+  forTank(tank) {
+    const profs = tank.livestock_array.map(l => this.PROFILES[l.profile] ?? this.PROFILES.community);
+    if (!profs.length) profs.push(this.PROFILES.community);
+    const ix = k => [Math.max(...profs.map(p => p[k][0])), Math.min(...profs.map(p => p[k][1]))];
+    const env = { ph: ix("ph"), gh: ix("gh"), kh: ix("kh"), tds: ix("tds"), tempC: ix("tempC"),
+                  nitrateMax: Math.min(...profs.map(p => p.nitrateMax)) };
+    // Detect impossible cohabitation (no band overlap) before repairing the bands for the UI.
+    env.conflict = ["ph", "gh", "tds"].some(k => env[k][0] > env[k][1]);
+    for (const k of ["ph", "gh", "kh", "tds", "tempC"])
+      if (env[k][0] > env[k][1]) env[k] = [Math.min(env[k][0], env[k][1]), Math.max(env[k][0], env[k][1])];
+    return env;
+  },
+  sensitivityCeiling(tank) {
+    const order = ["Low", "Medium", "High", "Extreme"];
+    return tank.livestock_array.reduce((m, l) => order.indexOf(l.sensitivity) > order.indexOf(m) ? l.sensitivity : m, "Low");
+  }
+};
+
+/** B3. Dosing mathematics. */
+const DoseEngine = {
+  /** Emergency 50% water-change volume in litres. */
+  emergencyWC: (tank) => Math.round(tank.dimensions.volume_litres * 0.5 * 10) / 10,
+  /** Monthly Profito at 1/4 strength: label dose is 1 ml / 10 L. */
+  profitoMonthly: (tank) => Math.round(tank.dimensions.volume_litres / 10 * 0.25 * 100) / 100,
+  /** Weekly maintenance change: 20%. */
+  weeklyWC: (tank) => Math.round(tank.dimensions.volume_litres * 0.2 * 10) / 10,
+  /** GH remineralizer: ~+1 dGH per 1.8 g salts / 10 L (generic SaltyShrimp curve). */
+  gramsToRaiseGH: (tank, dGH) => Math.round(dGH * 1.8 * tank.dimensions.volume_litres / 10 * 10) / 10,
+  /** AquaVitro shrimp GH label curve: ≈1.2 ml raises 10 L by 1 dGH. */
+  AQUAVITRO_ML_PER_DGH_10L: 1.2,
+  /** Remineralize ONLY the replacement bucket — never dose the display tank. */
+  remineralizeBucket(bucketL, targetGH) {
+    return Math.round(this.AQUAVITRO_ML_PER_DGH_10L * targetGH * bucketL / 10 * 100) / 100;
+  },
+  advise(s) {
+    const t = Targets.forTank(Store.tank()), c = s.current, tank = Store.tank(), out = [];
+    if (c.ammonia > 0 || c.nitrite > 0)
+      out.push(`⛔ Toxins detected — perform ${this.emergencyWC(tank)} L water change now. Re-test in 12 h. No feeding for 24 h.`);
+    if (c.gh < t.gh[0])
+      out.push(`GH low (${c.gh} < ${t.gh[0]} dGH): dose ${this.gramsToRaiseGH(tank, t.gh[0] - c.gh)} g GH+ remineralizer into RO top-up, not the tank directly.`);
+    if (c.tds > t.tds[1])
+      out.push(`TDS high (${c.tds} > ${t.tds[1]} ppm): replace ${this.weeklyWC(tank)} L with RO water re-mineralized to GH ${t.gh[0]}.`);
+    if (c.nitrate > t.nitrateMax)
+      out.push(`Nitrate ${c.nitrate} ppm exceeds ${t.nitrateMax} ppm ceiling for Caridina: 20% change + review feeding load.`);
+    if (c.ph > t.ph[1])
+      out.push(`pH ${c.ph} above ${t.ph[1]}: active soil buffering may be exhausting — check substrate age (leach profile: ${tank.substrate_matrix.leach_profile}).`);
+    if (!out.length) out.push("✅ All parameters inside the Caridina ideal envelope. No additives indicated — stability beats chasing numbers.");
+    return out;
+  }
+};
+
+/** B4. Botanical decay lifecycle (14-day catappa curve). */
+const LeafEngine = {
+  DURATION: 14,
+  phase(leaf) {
+    const days = Math.floor((Store.now() - leaf.added) / 86400000) + 1;
+    if (days <= 3)  return { key: "SOAK",  label: "Floating / Waterlogging",        color: "#4FC3F7", day: days };
+    if (days <= 11) return { key: "PEAK",  label: "Biofilm Maximum (Peak Grazing)", color: "#00E676", day: days };
+    if (days <= 14) return { key: "SKEL",  label: "Skeletonized — harvest soon",    color: "#FFA000", day: days };
+    return { key: "DONE", label: "⚠ Overdue — remove skeleton now", color: "#FF4A4A", day: days };
+  },
+  notifyIfNeeded(leaf) {
+    const p = this.phase(leaf);
+    if ((p.key === "SKEL" || p.key === "DONE") && !leaf.notified) {
+      leaf.notified = true;
+      pushNotify("🍂 Catappa leaf skeletonized", "Harvest the leaf skeleton before organic waste decomposition spikes ammonia.");
+    }
+  }
+};
+
+/** B5. Adaptive maintenance scheduler — phase-aware task compiler. */
+const Scheduler = {
+  ageDays: () => Math.floor((Store.now() - Store.tank().created_at) / 86400000),
+  phase() { return this.ageDays() < 28 ? 1 : 2; },
+  compile() {
+    const tank = Store.tank(), phase = this.phase(), tasks = [];
+    if (phase === 1) {
+      tasks.push({ when: "Every 72 h", what: "Full parameter scan (NH₃ / NO₂ / NO₃ / pH)", why: "Cycling tank — map the nitrogen curve", warn: false });
+      tasks.push({ when: "Daily", what: "Visual biofilm & mould check on hardscape", why: "Normal in weeks 1–3; remove fuzz manually", warn: false });
+      tasks.push({ when: "SUPPRESSED", what: "Liquid fertilizer dosing — hidden during cycle", why: "Active soil is leaching ammonia; ferts feed algae now", warn: true, hidden: true });
+    } else {
+      tasks.push({ when: "Weekly", what: `20% water change — ${DoseEngine.weeklyWC(tank)} L`, why: "Temperature-matched, re-mineralized RO; drip for Caridina", warn: false });
+      tasks.push({ when: "Monthly", what: `Easy-Life Profito ¼ strength — ${DoseEngine.profitoMonthly(tank)} ml`, why: "Low-tech tank: quarter dose prevents algae swing", warn: false });
+      tasks.push({ when: "Every 90 d", what: "Filter sponge rinse — Eheim Ecco 2234", why: "⚠ Rinse ONLY in siphoned tank water. Tap chlorine sterilizes the nitrifying colony.", warn: true });
+    }
+    tasks.push({ when: "Daily", what: `Photoperiod ${tank.hardware_tier.lighting.photoperiod_hours} h via smart plug`, why: "Automated — listener verifies power draw", warn: false });
+    return { phase, tasks };
+  }
+};
+
+/** B6. Colorimetric engine — chart lock, white-balance, hex→ppm. */
+const VisionEngine = {
+  CHARTS: {
+    ammonia: [["#FFF59D",0],["#DCE775",0.25],["#AED581",0.5],["#66BB6A",1.5],["#26A69A",3],["#00695C",6]],
+    nitrite: [["#E1F5FE",0],["#B3E5FC",0.25],["#CE93D8",0.5],["#AB47BC",1],["#8E24AA",2],["#4A148C",5]],
+    nitrate: [["#FFFDE7",0],["#FFF176",5],["#FFB74D",10],["#FF8A65",25],["#E53935",50],["#B71C1C",100]],
+    ph:      [["#F4511E",6.0],["#FB8C00",6.4],["#FDD835",6.8],["#7CB342",7.2],["#26A69A",7.6],["#1E88E5",8.0]]
+  },
+  /** Ambient white-balance: scale channels so the sampled background reads pure white. */
+  whiteBalance(rgb, bgSample) {
+    const g = [255 / Math.max(bgSample[0],1), 255 / Math.max(bgSample[1],1), 255 / Math.max(bgSample[2],1)];
+    return rgb.map((v,i) => Math.min(255, Math.round(v * g[i])));
+  },
+  hex2rgb: h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)],
+  rgb2hex: r => "#" + r.map(v => v.toString(16).padStart(2,"0")).join("").toUpperCase(),
+  /** Nearest-neighbour match in RGB space against the locked chart gradient. */
+  match(reagent, sampleRgb) {
+    let best = null;
+    for (const [hex, ppm] of this.CHARTS[reagent]) {
+      const c = this.hex2rgb(hex);
+      const d = Math.hypot(c[0]-sampleRgb[0], c[1]-sampleRgb[1], c[2]-sampleRgb[2]);
+      if (!best || d < best.d) best = { hex, ppm, d };
+    }
+    return best;
+  },
+  /** Full capture pipeline (camera frame simulated with a plausible tube sample). */
+  capture(reagent) {
+    const chart = this.CHARTS[reagent];
+    const truth = chart[Math.floor(Math.random() * chart.length)];
+    const cast = 18; // simulated warm indoor light cast
+    const raw = this.hex2rgb(truth[0]).map((v,i) => Math.max(0, v - [0,6,cast][i]));
+    const bgUnderCast = [255, 249, 237]; // "white" surface as the sensor sees it
+    const corrected = this.whiteBalance(raw, bgUnderCast);
+    const m = this.match(reagent, corrected);
+    return {
+      module: "AI_VISION_ANALYZER", reagent,
+      frames: { chart_lock: "LOCKED", tube_capture: "OK", white_surface_detected: true },
+      raw_hex: this.rgb2hex(raw),
+      white_balanced_hex: this.rgb2hex(corrected),
+      matched_chart_hex: m.hex,
+      confidence: Math.max(0.62, 1 - m.d / 260).toFixed(2),
+      value: m.ppm, unit: reagent === "ph" ? "pH" : "ppm",
+      captured_at: new Date(Store.now()).toISOString()
+    };
+  }
+};
+
+/* ================================================================
+   PART B2 — PREDICTIVE & PROTECTION ENGINES (release 2)
+   ================================================================ */
+
+/** Maintenance Mode — silences smart-plug hardware alarms for 30 minutes
+    so cleaning the filter with wet hands doesn't detonate your phone. */
+const MaintenanceMode = {
+  WINDOW_MS: 30 * 60000,
+  active: s => Date.now() < s.maintenanceUntil,
+  remainingMin: s => Math.max(0, Math.ceil((s.maintenanceUntil - Date.now()) / 60000))
+};
+
+/** Osmotic Shock Speed Monitor — ΔP/Δt velocity guard tuned for Caridina. */
+const ShockMonitor = {
+  LIMITS: {
+    tds:  { max: 15,  unit: "ppm/h", label: "TDS" },
+    temp: { max: 1.5, unit: "°C/h",  label: "Temperature" },
+    ph:   { max: 0.1, unit: "pH/h",  label: "pH" }
+  },
+  HOLD_MS: 48 * 3600000, // 48-hour stability directive after a breach
+  check(prev, next) {
+    if (!prev) return [];
+    // Clamp Δt to 15 min so back-to-back entries rate-limit rather than divide-by-zero.
+    const hours = Math.max((next.at - prev.at) / 3600000, 0.25);
+    const out = [];
+    for (const k of Object.keys(this.LIMITS)) {
+      const v = Math.abs(next[k] - prev[k]) / hours;
+      if (v > this.LIMITS[k].max)
+        out.push(`${this.LIMITS[k].label} ${v.toFixed(2)} ${this.LIMITS[k].unit} — limit ${this.LIMITS[k].max}`);
+    }
+    return out;
+  }
+};
+
+/** Substrate Exhaustion Forecast — pH>+0.3 with rising KH over a 30-day
+    window on active soil older than 365 days = buffer depletion signature. */
+const SubstrateEngine = {
+  ageDays: s => Math.floor((Store.now() - s.universal_tank_instance.substrate_matrix.added_at) / 86400000),
+  status(s) {
+    if (s.universal_tank_instance.substrate_matrix.base_layer !== "Active Soil")
+      return { key: "NA" };
+    const age = this.ageDays(s);
+    const win = s.readings.filter(r => r.at >= Store.now() - 30 * 86400000);
+    if (win.length >= 2 && age > 365) {
+      const dPH = win[win.length - 1].ph - win[0].ph;
+      const dKH = win[win.length - 1].kh - win[0].kh;
+      if (dPH > 0.3 && dKH > 0) return { key: "EXHAUSTED", age, dPH, dKH };
+    }
+    return { key: "NOMINAL", age };
+  }
+};
+
+/** Caridina gestation predictor — incubation days D = 200 / (T − 14.2). */
+const GestationEngine = {
+  incubationDays: T => 200 / (T - 14.2),
+  HIGH_TEMP_C: 24,
+  describe(entry) {
+    const D = this.incubationDays(entry.tempC);
+    const hatchAt = entry.at + D * 86400000;
+    const pct = Math.min(100, Math.max(0, (Store.now() - entry.at) / (D * 86400000) * 100));
+    return { D: Math.round(D * 10) / 10, hatchAt, pct,
+             daysLeft: Math.max(0, Math.ceil((hatchAt - Store.now()) / 86400000)) };
+  }
+};
+
+/** EC → TDS calibration matrix — k = TDS/EC must sit in 0.55–0.70 for
+    remineralized Caridina water; drift = ionic pollution signature. */
+const ECEngine = {
+  BAND: [0.55, 0.70],
+  k: (tds, ec) => (Number.isFinite(ec) && ec > 0) ? Math.round(tds / ec * 1000) / 1000 : null,
+  verdict(k) {
+    if (k == null) return { key: "NONE" };
+    return (k >= this.BAND[0] && k <= this.BAND[1]) ? { key: "OK", k } : { key: "DRIFT", k };
+  }
+};
+
+/** Pest & algae triage knowledge base — zero-chemical, low-tech playbooks. */
+const PestEngine = {
+  SYMPTOMS: {
+    worms: {
+      tag: "White thread-like worms on glass", pest: "Planaria (flatworm)",
+      risk: "Planaria prey on shrimplets and can kill berried females mid-moult.",
+      plan: [
+        "Build a DIY glass trap: bait a narrow-neck vial with a sliver of bloodworm, lay it on the substrate at lights-out, lift and discard the catch at dawn.",
+        "Halve feeding volume for 14 days — planaria populations track leftover protein.",
+        "Repeat trap cycles nightly. Avoid chemical wormers: fenbendazole wipes out your Ramshorn snails."
+      ]
+    },
+    polyps: {
+      tag: "Tiny multi-tentacled polyps on hardscape", pest: "Hydra",
+      risk: "Hydra sting and kill newborn shrimplets during their first free-swimming days.",
+      plan: [
+        "Pause the filter, spot-treat each polyp with 3% hydrogen peroxide from a 1 ml syringe, wait 15 minutes, restart flow.",
+        "Stop powdered/baby foods for two weeks — hydra bloom on micro-food density.",
+        "Wipe colonized glass and siphon the debris during the next 20% water change."
+      ]
+    },
+    bba: {
+      tag: "Tufts of black/grey hair on leaves", pest: "Black Brush Algae (BBA)",
+      risk: "Smothers slow growers (Anubias, Echinodorus) and signals organics/flow instability.",
+      plan: [
+        "Spot-dose 1 ml of 3% hydrogen peroxide per 10 L directly onto tufts with flow paused; tufts blush red and die within days.",
+        "Trim the worst-affected leaves — BBA never detaches voluntarily.",
+        "Cut the smart-plug photoperiod from 7 h to 6 h for 3 weeks and rinse filter media in siphoned tank water to fix the organics load."
+      ]
+    },
+    hairnet: {
+      tag: "Green hair-like netting", pest: "Green Hair Algae",
+      risk: "Entangles shrimp and outcompetes Rotala/Marsilea when light outruns nutrient demand.",
+      plan: [
+        "Twirl out the bulk with a clean toothbrush; remove every reachable strand.",
+        "Drop the photoperiod by 1 h on the smart-plug schedule and shade the tank from window light.",
+        "Hold nitrate ≤ 10 ppm with weekly 20% changes; resume fertilizer only after growth stalls."
+      ]
+    }
+  }
+};
+
+/* ================================================================
+   PART C — UI COMPONENTS (render functions bound to the Store)
+   ================================================================ */
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 3200);
+}
+function pushNotify(title, body) {
+  toast(title + " — " + body);
+  if ("Notification" in window && Notification.permission === "granted") new Notification(title, { body });
+  else if ("Notification" in window && Notification.permission !== "denied") Notification.requestPermission();
+}
+
+/* ---- Navigation (semantic, consistent across desktop nav + mobile tab bar) ---- */
+const NAV_LABELS = {
+  dashboard: "Tank Dashboard", vision: "Test-Tube Scanner", dosing: "Water Log & Dosing",
+  feeding: "Feeding & Botanicals", flora: "Plant Library & Leaf Doctor",
+  match: "Stocking Recommendations", schedule: "Maintenance Schedule", iot: "Tank Camera & Alerts"
+};
+function goView(v) {
+  if (!NAV_LABELS[v]) return;
+  $$(".view").forEach(x => x.classList.toggle("active", x.dataset.view === v));
+  $$("[data-nav]").forEach(b => {
+    const on = b.dataset.nav === v;
+    if (b.closest("nav")) b.classList.toggle("active", on);
+    // aria-current announces the active page to screen readers on BOTH navs
+    if (b.closest("nav")) on ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current");
+  });
+  // Breadcrumb: Home › Section (linked back for one-tap backtracking)
+  $("#crumbs").innerHTML = v === "dashboard" ? "Home"
+    : `<a href="#" data-nav="dashboard">Home</a> › ${NAV_LABELS[v]}`;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+/* Event delegation: covers header nav, mobile tab bar, CTA, breadcrumbs and
+   any in-content [data-nav] buttons — one consistent behavior everywhere. */
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-nav]");
+  if (b) { e.preventDefault(); goView(b.dataset.nav); }
+});
+
+/* ---- Dashboard ---- */
+function renderDashboard(s) {
+  const tank = s.universal_tank_instance, c = s.current, t = Targets.forTank(tank);
+  $("#tankName").textContent = tank.display_name;
+  $("#tankMeta").innerHTML =
+    `${tank.dimensions.volume_litres} L · ${tank.substrate_matrix.base_layer} + ${tank.substrate_matrix.cap_layer}` +
+    ` · ${tank.hardware_tier.filtration.brand} (${tank.hardware_tier.filtration.turnover_lph} L/h)` +
+    ` · CO₂ ${tank.hardware_tier.co2_injection ? "on" : "off"}`;
+  /* Three-tier RAG per metric: RED outside the band, AMBER inside but within
+     10% of a band edge (drifting), GREEN comfortably centred. */
+  const rag = (v, lo, hi) => {
+    if (v < lo || v > hi) return "alert";
+    const margin = (hi - lo) * 0.10;
+    return (v <= lo + margin || v >= hi - margin) ? "warn" : "ok";
+  };
+  const defs = [
+    ["pH", c.ph, rag(c.ph, t.ph[0], t.ph[1])],
+    ["NH₃ ppm", c.ammonia, c.ammonia > 0 ? "alert" : "ok"],
+    ["NO₂ ppm", c.nitrite, c.nitrite > 0 ? "alert" : "ok"],
+    ["NO₃ ppm", c.nitrate, c.nitrate > t.nitrateMax ? "alert" : c.nitrate > t.nitrateMax * 0.8 ? "warn" : "ok"],
+    ["GH °d", c.gh, rag(c.gh, t.gh[0], t.gh[1])],
+    ["KH °d", c.kh, c.kh > t.kh[1] ? "alert" : c.kh >= t.kh[1] * 0.9 && t.kh[1] > 0 ? "warn" : "ok"],
+    ["TDS", c.tds, rag(c.tds, t.tds[0], t.tds[1])],
+    ["°C", c.temp, rag(c.temp, t.tempC[0], t.tempC[1])]
+  ];
+  $("#metricRow").innerHTML = defs.map(([l, v, tier]) =>
+    `<div class="metric ${tier}"><div class="val ${tier === "alert" ? "bad" : ""}">${v}</div><div class="lbl">${l}</div></div>`).join("");
+  /* RAG master strip — mirrors the health state machine in plain colours. */
+  const hs = HealthEngine.evaluate(s);
+  $("#ragRed").classList.toggle("lit", hs === "CRITICAL_ALERT");
+  $("#ragAmber").classList.toggle("lit", hs === "BOTANICAL");
+  $("#ragGreen").classList.toggle("lit", hs === "EQUILIBRIUM");
+  const reds = defs.filter(d => d[2] === "alert").length, ambers = defs.filter(d => d[2] === "warn").length;
+  $("#ragSummary").textContent = reds ? `${reds} metric(s) RED · ${ambers} AMBER`
+    : ambers ? `${ambers} metric(s) drifting AMBER` : "All metrics GREEN";
+  $("#bioChips").innerHTML =
+    tank.livestock_array.map(l => `<span class="chip hot">🦐 ${l.species.split("(")[1]?.replace(")","") ?? l.species} ×${l.count}</span>`).join("") +
+    tank.flora_array.map(f => `<span class="chip">🌿 ${f.name}${f.tissue_culture ? " · TC" : ""}</span>`).join("");
+  $("#sensCeil").textContent = Targets.sensitivityCeiling(tank);
+  const { tasks } = Scheduler.compile();
+  $("#dashTimeline").innerHTML = tasks.slice(0, 3).map(tk =>
+    `<div class="tl-item ${tk.warn ? "warn" : ""} ${tk.hidden ? "hidden-phase" : ""}">
+       <div class="when">${tk.when}</div><div class="what"><strong>${tk.what}</strong><span>${tk.why}</span></div></div>`).join("");
+}
+
+/* ---- Module 2: sliders ---- */
+const SLIDERS = [
+  { k: "ph", label: "pH", min: 4, max: 9, step: 0.1 },
+  { k: "ammonia", label: "Ammonia NH₃", min: 0, max: 8, step: 0.25 },
+  { k: "nitrite", label: "Nitrite NO₂", min: 0, max: 5, step: 0.25 },
+  { k: "nitrate", label: "Nitrate NO₃", min: 0, max: 100, step: 1 },
+  { k: "gh", label: "GH (°dGH)", min: 0, max: 20, step: 0.5 },
+  { k: "kh", label: "KH (°dKH)", min: 0, max: 15, step: 0.5 },
+  { k: "tds", label: "TDS (ppm)", min: 0, max: 500, step: 5 },
+  { k: "temp", label: "Temp (°C)", min: 15, max: 32, step: 0.5 }
+];
+function renderSliders(s) {
+  $("#sliderStack").innerHTML = SLIDERS.map(d => {
+    const v = s.current[d.k], fill = ((v - d.min) / (d.max - d.min) * 100).toFixed(1);
+    return `<div class="slider-row"><label>${d.label}</label>
+      <input type="range" data-k="${d.k}" min="${d.min}" max="${d.max}" step="${d.step}" value="${v}" style="--fill:${fill}%">
+      <output id="out-${d.k}">${v}</output></div>`;
+  }).join("");
+  $$("#sliderStack input").forEach(inp => inp.addEventListener("input", () => {
+    const d = SLIDERS.find(x => x.k === inp.dataset.k), v = parseFloat(inp.value);
+    inp.style.setProperty("--fill", ((v - d.min) / (d.max - d.min) * 100) + "%");
+    $("#out-" + d.k).textContent = v;
+  }));
+}
+$("#btnCommitLog").addEventListener("click", () => {
+  const prev = Store.get().readings.at(-1) ?? null;
+  const ecRaw = parseFloat($("#ecInput").value);
+  Store.commit("params", s => {
+    $$("#sliderStack input").forEach(inp => s.current[inp.dataset.k] = parseFloat(inp.value));
+    s.current.ec = Number.isFinite(ecRaw) ? ecRaw : null;
+    const entry = { at: Store.now(), ...s.current };
+    s.readings.push(entry);
+    s.blockerAck = false; // re-arm the blocker on every new toxic reading
+    // Osmotic Shock Speed Monitor — velocity check against the previous log.
+    const breaches = ShockMonitor.check(prev, entry);
+    if (breaches.length) s.shock = { at: Store.now(), breaches, until: Store.now() + ShockMonitor.HOLD_MS };
+  });
+  const s = Store.get();
+  const advice = DoseEngine.advise(s);
+  // EC→TDS calibration matrix.
+  const v = ECEngine.verdict(ECEngine.k(s.current.tds, s.current.ec));
+  $("#kReadout").textContent = v.k ?? "—";
+  $("#kReadout").classList.toggle("dead", v.key === "DRIFT");
+  if (v.key === "DRIFT") {
+    advice.unshift(`⚠ Ionic Imbalance Detected: The ratio between TDS and Conductivity (k = ${v.k}) is shifting abnormally outside 0.55–0.70. This indicates a buildup of non-beneficial organic waste or minerals. A 20% water change with pure remineralized RO water is highly recommended to restore ionic balance.`);
+    pushNotify("⚠ Ionic Imbalance Detected", `k = ${v.k} outside the 0.55–0.70 envelope.`);
+  }
+  $("#doseAdvice").innerHTML = advice.map(a => `<p class="mb">• ${a}</p>`).join("");
+  toast("Reading committed to local cache");
+});
+
+/* ---- Module 2: water replacement tasks ---- */
+$("#btnLogTopoff").addEventListener("click", () => {
+  Store.commit("water", s => s.events.push({ type: "topoff", at: Store.now() }));
+  $("#doseBanner").innerHTML =
+    `<div class="banner danger">⚠ EVAPORATION EVENT DETECTED: Use 100% pure RO or distilled water ONLY.
+     Do not add minerals or tap water. Evaporated water leaves minerals behind; adding more will trigger
+     lethal TDS accumulation.</div>`;
+});
+$("#btnLogWC").addEventListener("click", () => {
+  const bucket = Math.max(0.5, parseFloat($("#bucketVol").value) || DoseEngine.weeklyWC(Store.tank()));
+  const t = Targets.forTank(Store.tank());
+  const targetGH = Math.round((t.gh[0] + t.gh[1]) / 2 * 10) / 10;
+  const ml = DoseEngine.remineralizeBucket(bucket, targetGH); // bucket volume ONLY — never whole-tank
+  Store.commit("water", s => s.events.push({ type: "wc", at: Store.now(), litres: bucket }));
+  $("#doseBanner").innerHTML =
+    `<div class="banner ok">💧 Routine change logged (${bucket} L). Remineralize the replacement bucket only —
+     dose <strong>${ml} ml AquaVitro shrimp GH into the ${bucket} L bucket of RO</strong> to hit GH ${targetGH}.
+     Temperature-match within ±1 °C and drip back in slowly for Caridina.</div>`;
+});
+
+/* ---- Global shock banner ---- */
+function renderShock(s) {
+  const el = $("#shockBanner");
+  el.innerHTML = (s.shock && Store.now() < s.shock.until)
+    ? `<div class="banner danger">⚠ Osmotic Strain Detected! Parameters shifted too rapidly in the last cycle
+       (${s.shock.breaches.join(" · ")}). Monitor shrimp for lethargy or opaque coloring. Keep water completely
+       stable for the next 48 hours to allow acclimation.</div>`
+    : "";
+}
+
+/* ---- Global blocker ---- */
+function renderBlocker(s) {
+  const toxic = s.current.ammonia > 0 || s.current.nitrite > 0;
+  const show = toxic && !s.blockerAck;
+  $("#blocker").classList.toggle("show", show);
+  if (toxic) {
+    $("#blockerReason").textContent =
+      `Detected — Ammonia: ${s.current.ammonia} ppm · Nitrite: ${s.current.nitrite} ppm. Extreme-sensitivity livestock present (Caridina).`;
+    $("#blockerWC").textContent = DoseEngine.emergencyWC(Store.tank()) + " L";
+  }
+}
+$("#btnAckBlocker").addEventListener("click", () => Store.commit("blocker", s => { s.blockerAck = true; }));
+
+/* ---- Module 1: vision ---- */
+function renderSwatches(reagent, matchedHex, tubeHex) {
+  $("#swatchRow").innerHTML =
+    VisionEngine.CHARTS[reagent].map(([hex, ppm]) =>
+      `<div class="swatch" style="background:${hex};outline:${hex === matchedHex ? "3px solid var(--accent)" : "none"}">${ppm}</div>`).join("") +
+    `<div class="swatch" style="background:${tubeHex};border-style:dashed">TUBE</div>`;
+}
+/* Confirm-to-log pipeline: every vision read must be human-confirmed, then it
+   writes both the live value AND a full history entry (trends + shock check). */
+let pendingVision = null;
+function logVisionResult(reagent, value) {
+  pendingVision = { reagent, value };
+  $("#visConfirm").innerHTML =
+    `<div class="banner ok">Detected <strong>${reagent.toUpperCase()} = ${value}${reagent === "ph" ? "" : " ppm"}</strong>
+      — confirm to write it into today's log, the trend history and the alert engines.
+      <div class="row mt">
+        <button class="btn primary" id="btnVisOk">✓ Confirm & Log</button>
+        <button class="btn" id="btnVisNo">Discard</button>
+      </div></div>`;
+  $("#btnVisOk").addEventListener("click", () => {
+    const p = pendingVision; if (!p) return;
+    const prev = Store.get().readings.at(-1) ?? null;
+    Store.commit("params", s => {
+      s.current[p.reagent] = p.value;
+      if (p.reagent !== "ph") s.blockerAck = false;
+      const entry = { at: Store.now(), ...s.current };
+      s.readings.push(entry);
+      const breaches = ShockMonitor.check(prev, entry);
+      if (breaches.length) s.shock = { at: Store.now(), breaches, until: Store.now() + ShockMonitor.HOLD_MS };
+    });
+    pendingVision = null; $("#visConfirm").innerHTML = "";
+    toast(`✓ ${p.reagent.toUpperCase()} = ${p.value} confirmed → logged to history & trends`);
+  });
+  $("#btnVisNo").addEventListener("click", () => { pendingVision = null; $("#visConfirm").innerHTML = ""; });
+}
+$("#btnCapture").addEventListener("click", () => {
+  const reagent = $("#reagentSel").value;
+  const payload = VisionEngine.capture(reagent);
+  renderSwatches(reagent, payload.matched_chart_hex, payload.white_balanced_hex);
+  $("#visionPayload").textContent = JSON.stringify(payload, null, 2);
+  logVisionResult(reagent, payload.value);
+});
+
+/* Live pixel-sampling pipeline: photo → canvas → crosshair clicks → engines. */
+const Vis = { img: null, samples: { chart: null, tube: null }, next: "chart" };
+const visCanvas = $("#visCanvas");
+const vctx = visCanvas.getContext("2d", { willReadFrequently: true });
+function drawVis() {
+  const W = visCanvas.width, H = visCanvas.height;
+  vctx.fillStyle = "#060a0c"; vctx.fillRect(0, 0, W, H);
+  if (Vis.img) {
+    const r = Math.min(W / Vis.img.width, H / Vis.img.height);
+    vctx.drawImage(Vis.img, (W - Vis.img.width * r) / 2, (H - Vis.img.height * r) / 2,
+                   Vis.img.width * r, Vis.img.height * r);
+  } else {
+    vctx.fillStyle = "rgba(255,255,255,0.25)"; vctx.font = "600 28px sans-serif"; vctx.textAlign = "center";
+    vctx.fillText("📷 Scan Live Test Sample — or Simulate Capture", W / 2, H / 2);
+    vctx.textAlign = "start";
+  }
+  // Crosshair overlays: green = chart calibration lock, amber = tube liquid.
+  for (const [slot, col] of [["chart", "#00E676"], ["tube", "#FFA000"]]) {
+    const p = Vis.samples[slot]; if (!p) continue;
+    vctx.strokeStyle = col; vctx.lineWidth = 3;
+    vctx.beginPath(); vctx.arc(p.x, p.y, 16, 0, 7); vctx.stroke();
+    vctx.beginPath();
+    vctx.moveTo(p.x - 26, p.y); vctx.lineTo(p.x + 26, p.y);
+    vctx.moveTo(p.x, p.y - 26); vctx.lineTo(p.x, p.y + 26); vctx.stroke();
+    vctx.font = "bold 19px sans-serif"; vctx.fillStyle = col;
+    vctx.fillText(slot.toUpperCase(), p.x + 22, p.y - 22);
+  }
+}
+/** Localized average RGB over a (2r)² px window centred on the click. */
+function avgRGB(x, y, r = 5) {
+  const d = vctx.getImageData(Math.max(0, x - r), Math.max(0, y - r), r * 2, r * 2).data;
+  let R = 0, G = 0, B = 0, n = 0;
+  for (let i = 0; i < d.length; i += 4) { R += d[i]; G += d[i + 1]; B += d[i + 2]; n++; }
+  return [Math.round(R / n), Math.round(G / n), Math.round(B / n)];
+}
+function loadVisFile(e) {
+  const f = e.target.files[0]; if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    Vis.img = img; Vis.samples = { chart: null, tube: null }; Vis.next = "chart";
+    drawVis(); $("#btnAnalyze").disabled = true;
+    $("#visHint").textContent = "Frame loaded — click the CHART swatch first.";
+  };
+  img.src = URL.createObjectURL(f);
+  e.target.value = ""; // allow re-selecting the same file
+}
+$("#visFileCam").addEventListener("change", loadVisFile);  // rear camera capture
+$("#visFileLib").addEventListener("change", loadVisFile);  // photo library upload
+visCanvas.addEventListener("click", e => {
+  if (!Vis.img) { toast("Load a photo first — 📷 Scan Live Test Sample"); return; }
+  const box = visCanvas.getBoundingClientRect();
+  const x = (e.clientX - box.left) * visCanvas.width / box.width;
+  const y = (e.clientY - box.top) * visCanvas.height / box.height;
+  Vis.samples[Vis.next] = { x, y, rgb: avgRGB(x, y) };
+  $("#visHint").textContent = Vis.next === "chart"
+    ? "Chart locked ✓ — now click the tube liquid." : "Both samples locked ✓ — hit Analyze.";
+  Vis.next = Vis.next === "chart" ? "tube" : "chart";
+  drawVis();
+  $("#btnAnalyze").disabled = !(Vis.samples.chart && Vis.samples.tube);
+});
+$("#btnAnalyze").addEventListener("click", () => {
+  const reagent = $("#reagentSel").value;
+  // Ambient white balance: average the four frame corners (plain white surface assumption).
+  const corners = [[10, 10], [visCanvas.width - 14, 10], [10, visCanvas.height - 14], [visCanvas.width - 14, visCanvas.height - 14]]
+    .map(([x, y]) => avgRGB(x, y, 4));
+  const bg = [0, 1, 2].map(i => Math.round(corners.reduce((a, c) => a + c[i], 0) / corners.length));
+  const chartWB = VisionEngine.whiteBalance(Vis.samples.chart.rgb, bg);
+  const tubeWB  = VisionEngine.whiteBalance(Vis.samples.tube.rgb, bg);
+  const anchor = VisionEngine.match(reagent, chartWB); // calibration lock quality
+  const m = VisionEngine.match(reagent, tubeWB);        // the actual chemistry read
+  const payload = {
+    module: "AI_VISION_ANALYZER", mode: "LIVE_PIXEL_SAMPLING", reagent,
+    ambient_white_sample: VisionEngine.rgb2hex(bg),
+    chart_anchor: { sampled: VisionEngine.rgb2hex(chartWB), locked_to: anchor.hex, calibration_ppm: anchor.ppm },
+    tube: { raw: VisionEngine.rgb2hex(Vis.samples.tube.rgb), white_balanced: VisionEngine.rgb2hex(tubeWB) },
+    matched_chart_hex: m.hex, value: m.ppm, unit: reagent === "ph" ? "pH" : "ppm",
+    confidence: Math.max(0.5, 1 - m.d / 260).toFixed(2),
+    captured_at: new Date(Store.now()).toISOString()
+  };
+  $("#visionPayload").textContent = JSON.stringify(payload, null, 2);
+  renderSwatches(reagent, m.hex, VisionEngine.rgb2hex(tubeWB));
+  logVisionResult(reagent, m.ppm);
+});
+
+/* ---- Module 3: diet wheel ---- */
+const DIET = [
+  { d: "Mon", label: "High-Protein", ico: "🍖", color: "#FF7043" },
+  { d: "Tue", label: "Greens / Algae Wafer", ico: "🥬", color: "#66BB6A" },
+  { d: "Wed", label: "Fasting Day", ico: "⛔", color: "#546E7A" },
+  { d: "Thu", label: "Calcium Boost", ico: "🦴", color: "#4FC3F7" },
+  { d: "Fri", label: "High-Protein", ico: "🍖", color: "#FF7043" },
+  { d: "Sat", label: "Greens / Algae Wafer", ico: "🥬", color: "#66BB6A" },
+  { d: "Sun", label: "Fasting Day", ico: "⛔", color: "#546E7A" }
+];
+function renderDiet() {
+  const idx = new Date(Store.now()).getDay() === 0 ? 6 : new Date(Store.now()).getDay() - 1;
+  const seg = 360 / DIET.length;
+  const gradient = DIET.map((x, i) => `${x.color}33 ${i * seg}deg ${(i + 1) * seg}deg`).join(", ");
+  const wheel = $("#dietWheel");
+  wheel.style.background = `conic-gradient(${gradient})`;
+  wheel.style.transform = `rotate(${-(idx * seg + seg / 2)}deg)`;
+  const today = DIET[idx];
+  $("#wheelHub").innerHTML = `<span style="transform:rotate(${idx * seg + seg / 2}deg)">${today.ico}<br>${today.d}</span>`;
+  $("#dietToday").innerHTML =
+    `<div class="metric" style="text-align:left;padding:16px"><div class="lbl">Today's rotation</div>
+     <div class="val" style="font-size:20px;color:${today.color}">${today.ico} ${today.label}</div>
+     <p class="faint mt">${today.label === "Fasting Day"
+        ? "No food. Shrimp graze biofilm; fasting protects water quality in a 58 L system."
+        : "Feed only what is consumed in 2–3 h, then remove. Caridina overfeeding = planaria risk."}</p></div>`;
+  $("#dietWeek").innerHTML = DIET.map((x, i) =>
+    `<span class="chip ${i === idx ? "hot" : ""}">${x.d} ${x.ico}</span>`).join("");
+}
+
+/* ---- Module 3: botanicals ---- */
+$("#btnAddLeaf").addEventListener("click", () => {
+  Store.commit("leaf", s => s.botanicals.push({ id: crypto.randomUUID(), name: "Nano Catappa Leaf", added: Store.now(), notified: false }));
+  toast("🍂 Catappa tracker started — 14-day decay curve armed");
+});
+function renderLeaves(s) {
+  if (!s.botanicals.length) { $("#leafList").innerHTML = `<p class="faint">No active botanicals. Add a leaf to begin lifecycle tracking.</p>`; return; }
+  $("#leafList").innerHTML = s.botanicals.map(leaf => {
+    const p = LeafEngine.phase(leaf); LeafEngine.notifyIfNeeded(leaf);
+    const pct = Math.min(100, p.day / LeafEngine.DURATION * 100);
+    return `<div class="leaf-item" style="--leafcolor:${p.color}">
+      <span style="font-size:20px">🍂</span>
+      <div style="flex:1"><div class="row spread"><strong style="font-size:13px">${leaf.name}</strong>
+        <span class="faint">Day ${p.day} / ${LeafEngine.DURATION}</span></div>
+        <div class="bar"><i style="width:${pct}%"></i></div>
+        <div class="phase mt" style="margin-top:6px">${p.label}</div></div>
+      <button class="btn" data-harvest="${leaf.id}">Harvest</button></div>`;
+  }).join("");
+  $$("[data-harvest]").forEach(b => b.addEventListener("click", () =>
+    Store.commit("leaf", s => { s.botanicals = s.botanicals.filter(l => l.id !== b.dataset.harvest); toast("Leaf skeleton harvested — organic load protected"); })));
+}
+
+/* ---- Module 4: scheduler ---- */
+function renderSchedule() {
+  const { phase, tasks } = Scheduler.compile();
+  $("#tankAge").textContent = ` ${Scheduler.ageDays()} days`;
+  const chip = $("#phaseChip");
+  chip.textContent = phase === 1 ? "PHASE 1 · CYCLING" : "PHASE 2 · MATURE";
+  chip.className = "chip " + (phase === 1 ? "" : "hot");
+  $("#schedList").innerHTML = tasks.map(tk =>
+    `<div class="tl-item ${tk.warn ? "warn" : ""} ${tk.hidden ? "hidden-phase" : ""}">
+      <div class="when">${tk.when}</div>
+      <div class="what"><strong>${tk.what}</strong><span>${tk.why}</span></div></div>`).join("");
+}
+
+/* ---- Module 5: IoT ---- */
+function renderIoT(s) {
+  const w = $("#wattMeter");
+  const muted = MaintenanceMode.active(s);
+  if (s.hardware.failed && !muted) {
+    w.textContent = "0.0 W"; w.classList.add("dead");
+    $("#wattNote").innerHTML = `<strong style="color:#FF4A4A">CRITICAL — zero draw during peak cycle. Canister pump failure suspected. Livestock O₂ window: ~6 h.</strong>`;
+  } else if (s.hardware.failed && muted) {
+    w.textContent = "0.0 W"; w.classList.remove("dead");
+    $("#wattNote").innerHTML = `🧤 0 W detected but <strong>maintenance mode is muting alarms</strong> for ${MaintenanceMode.remainingMin(s)} more min. Alarms re-arm automatically.`;
+  } else {
+    w.textContent = s.hardware.filterWatts.toFixed(1) + " W"; w.classList.remove("dead");
+    $("#wattNote").textContent = "Nominal draw for Eheim Ecco 2234 (rated 8–15 W).";
+  }
+  const l = Store.tank().hardware_tier.lighting;
+  $("#plugSched").innerHTML = `💡 Lighting: ON 11:00 → OFF ${11 + l.photoperiod_hours}:00 (${l.photoperiod_hours} h photoperiod) · smart plug ${l.smart_plug_integrated ? "linked ✓" : "not linked"}`;
+}
+$("#btnSimFail").addEventListener("click", () => {
+  Store.commit("hw", s => { s.hardware.failed = true; });
+  if (MaintenanceMode.active(Store.get())) toast("🧤 0 W event logged silently — maintenance mode active");
+  else pushNotify("🔌 HARDWARE FAILURE", "Filtration smart plug reports 0 W during peak cycle.");
+});
+$("#btnSimRestore").addEventListener("click", () => Store.commit("hw", s => { s.hardware.failed = false; }));
+
+/* RTSP — Tapo C210 (fw 1.5.3, 192.168.4.82) hookup:
+   1. Tapo app → camera → Advanced Settings → Camera Account: create the
+      RTSP username/password (this is NOT your TP-Link cloud login).
+   2. Streams: rtsp://<user>:<pass>@192.168.4.82:554/stream1 (1080p H.264)
+               rtsp://<user>:<pass>@192.168.4.82:554/stream2 (360p, cheap preview)
+   3. Give the cam a DHCP reservation so .82 never moves.
+   Browsers cannot decode RTSP natively; production pipeline is
+   RTSP → MediaMTX/ffmpeg → fMP4 (H.264) over WebSocket → MediaSource.
+   The <video> element below is the mount point for that MSE buffer. */
+$("#btnAIVision").addEventListener("click", () => {
+  const flora = Store.tank().flora_array;
+  const report = {
+    module: "AI_CLOUD_VISION", snapshot: "frame_" + Date.now() + ".jpg", model: "vision-llm/aqua-diagnost-2",
+    plant_tissue_findings: [
+      { subject: flora[0].name, finding: "Interveinal chlorosis on new growth", diagnosis: "Iron (Fe) deficiency — early", confidence: 0.87, action: "Micro-dose chelated Fe post Phase-2 only" },
+      { subject: flora[1].name, finding: "Pinholes in mature leaves", diagnosis: "Potassium (K) deficiency", confidence: 0.81, action: "Root tab beneath crown (root feeder heavy)" }
+    ],
+    livestock_findings: [
+      { subject: "Crystal Red Shrimp colony", finding: "Active grazing, intact carapace coloration, no bacterial patches", status: "HEALTHY", confidence: 0.93 }
+    ],
+    pest_triage: [...selectedSyms].map(k => ({
+      symptom: PestEngine.SYMPTOMS[k].tag, identified: PestEngine.SYMPTOMS[k].pest
+    })),
+    generated_at: new Date(Store.now()).toISOString()
+  };
+  renderDiagCards(); // surface matching action-plan cards alongside the report
+  const el = $("#aiReport"); el.style.display = "block"; el.textContent = JSON.stringify(report, null, 2);
+  toast("🧠 Vision assessment complete — 2 deficiencies flagged");
+});
+
+/* ---- Demo time-warp ---- */
+$("#btnAdvanceDay").addEventListener("click", () => {
+  Store.commit("time", s => { s.dayOffset += 1; });
+  toast("Simulated +1 day (tank age, decay curves, diet wheel advanced)");
+});
+
+/* ================================================================
+   SPECIES DATABASE — heated freshwater livestock, breed/morph level.
+   { s: species/morph, c: category group, p: water-profile key }
+   ================================================================ */
+const SPECIES_DB = [
+  // — Tetras & characins —
+  ...["Neon Tetra","Cardinal Tetra","Green Neon Tetra","Ember Tetra","Black Neon Tetra","Rummy-nose Tetra",
+     "Glowlight Tetra","Lemon Tetra","Black Phantom Tetra","Red Phantom Tetra","Serpae Tetra","Congo Tetra",
+     "Diamond Tetra","Bloodfin Tetra","X-ray Tetra","Bleeding Heart Tetra","Silver-tip Tetra"]
+     .map(s => ({ s, c: "Fish — Tetras & Characins", p: "community" })),
+  ...["Marble Hatchetfish","Silver Hatchetfish","Golden Pencilfish (beckfordi)","Coral Red Pencilfish (mortenthaleri)"]
+     .map(s => ({ s, c: "Fish — Tetras & Characins", p: "blackwater" })),
+  // — Rasboras & danios —
+  ...["Harlequin Rasbora","Lambchop Rasbora","Chili Rasbora","Phoenix Rasbora","Celestial Pearl Danio (Galaxy)",
+     "Kubotai (Green) Rasbora","Dwarf Rasbora (maculata)","Zebra Danio","Leopard Danio","Longfin Zebra Danio",
+     "Pearl Danio","Glowlight Danio","White Cloud Mountain Minnow"]
+     .map(s => ({ s, c: "Fish — Rasboras & Danios", p: "community" })),
+  // — Barbs —
+  ...["Cherry Barb","Tiger Barb","Green Tiger Barb","Albino Tiger Barb","Odessa Barb","Gold Barb","Rosy Barb",
+     "Denison (Roseline) Barb","Checker Barb"]
+     .map(s => ({ s, c: "Fish — Barbs", p: "community" })),
+  // — Livebearers (hard alkaline) —
+  ...["Guppy — Cobra","Guppy — Tuxedo","Guppy — Moscow Blue","Guppy — Dumbo Ear","Guppy — Endler hybrid",
+     "Endler's Livebearer","Molly — Black","Molly — Dalmatian","Molly — Sailfin","Molly — Balloon","Molly — Lyretail",
+     "Platy — Mickey Mouse","Platy — Sunset","Platy — Wagtail","Platy — Tuxedo","Swordtail — Red","Swordtail — Pineapple",
+     "Swordtail — Koi","Least Killifish (Heterandria)"]
+     .map(s => ({ s, c: "Fish — Livebearers", p: "livebearer" })),
+  // — Bettas & gouramis —
+  ...["Betta — Veiltail","Betta — Crowntail","Betta — Halfmoon","Betta — Plakat","Betta — Koi Plakat","Betta — Dumbo Ear",
+     "Betta imbellis (wild)","Dwarf Gourami","Powder Blue Dwarf Gourami","Flame Dwarf Gourami","Honey Gourami",
+     "Gold Honey Gourami","Red Honey Gourami","Pearl Gourami","Sparkling Gourami","Moonlight Gourami",
+     "Three-spot / Opaline / Gold Gourami","Paradise Fish"]
+     .map(s => ({ s, c: "Fish — Bettas & Gouramis", p: "betta" })),
+  ...["Licorice Gourami","Chocolate Gourami"].map(s => ({ s, c: "Fish — Bettas & Gouramis", p: "blackwater" })),
+  // — Corydoras & small catfish —
+  ...["Bronze Corydoras","Albino Corydoras","Peppered Corydoras","Panda Corydoras","Sterbai Corydoras",
+     "Julii / Trilineatus Corydoras","Adolfoi Corydoras","Venezuela Orange Corydoras","Similis Corydoras",
+     "Pygmy Corydoras","Habrosus Corydoras","Hastatus Corydoras"]
+     .map(s => ({ s, c: "Fish — Corydoras & Catfish", p: "community" })),
+  // — Plecos & algae eaters —
+  ...["Bristlenose Pleco — Common","Bristlenose Pleco — Albino","Bristlenose Pleco — Super Red",
+     "Bristlenose Pleco — Blue-eye Lemon","Clown Pleco","Rubber-lip Pleco","Zebra Pleco (L046)",
+     "Otocinclus — Common","Otocinclus — Zebra","Whiptail Catfish","Twig Catfish","Siamese Algae Eater","Flying Fox"]
+     .map(s => ({ s, c: "Fish — Plecos & Algae Eaters", p: "community" })),
+  // — Loaches —
+  ...["Kuhli Loach — Banded","Kuhli Loach — Black","Clown Loach","Yoyo Loach","Zebra Loach","Dwarf Chain Loach",
+     "Rosy Loach","Hillstream (Borneo) Loach"]
+     .map(s => ({ s, c: "Fish — Loaches", p: "community" })),
+  // — American cichlids —
+  ...["Angelfish — Silver","Angelfish — Koi","Angelfish — Black Lace","Angelfish — Marble","Altum Angelfish",
+     "German Blue Ram","Electric Blue Ram","Gold Ram","Bolivian Ram","Keyhole Cichlid","Electric Blue Acara",
+     "Kribensis","Firemouth","Convict Cichlid","Severum — Gold","Severum — Green","Oscar"]
+     .map(s => ({ s, c: "Fish — Cichlids (American & Dwarf)", p: "community" })),
+  ...["Apistogramma cacatuoides","Apistogramma agassizii","Apistogramma borellii","Apistogramma macmasteri"]
+     .map(s => ({ s, c: "Fish — Cichlids (American & Dwarf)", p: "blackwater" })),
+  ...["Discus — Blue Diamond","Discus — Pigeon Blood","Discus — Red Turquoise","Discus — Checkerboard","Discus — Heckel (wild)"]
+     .map(s => ({ s, c: "Fish — Discus", p: "discus" })),
+  // — African rift cichlids —
+  ...["Yellow Lab (Labidochromis caeruleus)","Demasoni","Red Zebra","Acei","Peacock — OB","Peacock — Dragon Blood",
+     "Peacock — Sunshine","Frontosa"]
+     .map(s => ({ s, c: "Fish — Cichlids (African Rift)", p: "rift" })),
+  // — Rainbows, killifish & oddballs —
+  ...["Boesemani Rainbowfish","Neon Dwarf Rainbowfish","Turquoise Rainbowfish","Forktail Blue-eye","Threadfin Rainbowfish",
+     "Celebes Rainbowfish","Gardneri Killifish","Golden Wonder Killifish","Clown Killifish","Scarlet Badis","Badis badis",
+     "Pea Puffer","Bumblebee Goby (freshwater)"]
+     .map(s => ({ s, c: "Fish — Rainbows, Killis & Oddballs", p: "community" })),
+  // — Neocaridina shrimp morphs —
+  ...["Red Cherry","Sakura Red","Fire Red","Bloody Mary","Kanoko Red","Yellow","Yellow Golden-Back","Orange Sunkist",
+     "Orange Rili","Green Jade","Blue Dream","Blue Velvet","Blue Jelly","Blue Rili","Red Rili","Carbon Rili",
+     "Black Rose","Chocolate","Snowball","Wild Type"]
+     .map(s => ({ s: "Neocaridina — " + s, c: "Shrimp — Neocaridina", p: "neocaridina" })),
+  // — Caridina shrimp morphs —
+  ...["Crystal Red (CRS A–SSS)","Crystal Black (CBS)","Golden Bee","Red Tiger","Tangerine Tiger","Orange-Eyed Blue Tiger (OEBT)",
+     "Raccoon Tiger","Fancy Tiger","Blue Bolt","Red King Kong","Black King Kong","Panda","Wine Red","Shadow Mosura",
+     "Blue Steel","Pinto — Red","Pinto — Black","Green Babaulti","Zebra Babaulti"]
+     .map(s => ({ s: "Caridina — " + s, c: "Shrimp — Caridina", p: "caridina" })),
+  ...["Cardinal Sulawesi","Yellow Cheek Sulawesi","Harlequin Sulawesi"]
+     .map(s => ({ s: "Caridina — " + s, c: "Shrimp — Sulawesi", p: "sulawesi" })),
+  ...[{ s: "Amano Shrimp", p: "community" }, { s: "Bamboo (Fan) Shrimp", p: "community" },
+     { s: "Vampire Shrimp", p: "community" }, { s: "Ghost / Glass Shrimp", p: "community" }]
+     .map(x => ({ ...x, c: "Shrimp — Other" })),
+  // — Snails —
+  ...["Nerite — Zebra","Nerite — Tiger","Nerite — Horned","Nerite — Olive","Nerite — Red Racer",
+     "Mystery — Gold","Mystery — Ivory","Mystery — Blue","Mystery — Purple","Mystery — Magenta",
+     "Ramshorn — Red","Ramshorn — Blue","Ramshorn — Pink","Ramshorn — Leopard","Malaysian Trumpet",
+     "Assassin Snail","Rabbit — Yellow","Rabbit — Chocolate","Black Devil Snail","Bladder / Pond Snail"]
+     .map(s => ({ s: s + " Snail", c: "Snails", p: "snail" }))
+];
+
+/* ================================================================
+   PLANT DATABASE — care card per species.
+   { n, feed, light, co2, diff, place, note }
+   ================================================================ */
+const P = (n, feed, light, co2, diff, place, note) => ({ n, feed, light, co2, diff, place, note });
+const PLANT_DB = [
+  // Epiphytes
+  P("Anubias Barteri","Water Column Light","Low","No","Easy","Epiphyte","Glue/tie to hardscape; never bury the rhizome or it rots."),
+  P("Anubias Nana","Water Column Light","Low","No","Easy","Epiphyte","Slow grower; wipe leaves during maintenance to deter GSA."),
+  P("Anubias Nana Petite","Water Column Light","Low","No","Easy","Epiphyte","Tiny leaves; perfect shrimp grazing platform on driftwood."),
+  P("Anubias Coffeefolia","Water Column Light","Low","No","Easy","Epiphyte","Ribbed bronze new growth; same rhizome rule as all Anubias."),
+  P("Anubias Pinto","Water Column Light","Low","No","Medium","Epiphyte","White variegation = less chlorophyll; keep light moderate."),
+  P("Java Fern","Water Column Light","Low","No","Easy","Epiphyte","Black spots under leaves are spores, not disease."),
+  P("Java Fern Windelov","Water Column Light","Low","No","Easy","Epiphyte","Lace tips; propagate from leaf plantlets."),
+  P("Java Fern Trident","Water Column Light","Low","No","Easy","Epiphyte","Narrow forked leaves; tolerant of low light."),
+  P("Bolbitis (African Water Fern)","Water Column Light","Low","Optional","Medium","Epiphyte","Loves flow; place near the filter outlet."),
+  P("Bucephalandra — Green Wavy","Water Column Light","Low","Optional","Medium","Epiphyte","Slow; melts on import then regrows from rhizome."),
+  P("Bucephalandra — Brownie Phantom","Water Column Light","Low","Optional","Medium","Epiphyte","Iridescent under LED; keep flow gentle but present."),
+  // Mosses
+  P("Java Moss","Water Column Light","Low","No","Easy","Moss","Shrimplet nursery #1; trim to keep the pad dense."),
+  P("Christmas Moss","Water Column Light","Low","Optional","Easy","Moss","Tidier fronds than Java; attach flat for tree effects."),
+  P("Flame Moss","Water Column Light","Low","Optional","Medium","Moss","Vertical growth habit; slower than Java."),
+  P("Weeping Moss","Water Column Light","Low","Optional","Medium","Moss","Cascades downward — beautiful on wood ledges."),
+  P("Phoenix (Fissidens) Moss","Water Column Light","Low","Optional","Medium","Moss","Feathery; attach with mesh, very slow to anchor."),
+  P("Riccia Fluitans","Water Column Heavy","High","Yes","Hard","Moss","Pearls heavily under CO2; needs re-tying as it grows."),
+  P("Süsswassertang","Water Column Light","Low","No","Easy","Moss","Liverwort 'seaweed'; thrives in shade."),
+  // Rosettes / crypts / swords
+  P("Cryptocoryne Wendtii Green","Root Feeder","Low","No","Easy","Midground","Expect 'crypt melt' after planting; leaves regrow adapted."),
+  P("Cryptocoryne Wendtii Brown","Root Feeder","Low","No","Easy","Midground","Bronze tones deepen under stronger light."),
+  P("Cryptocoryne Wendtii Tropica","Root Feeder","Low","No","Easy","Midground","Hammered leaf texture; root tabs yearly."),
+  P("Cryptocoryne Parva","Root Feeder","Medium","Optional","Medium","Foreground","Smallest crypt; very slow — plant dense from the start."),
+  P("Cryptocoryne Lucens","Root Feeder","Low","No","Easy","Foreground","Strap-leaf clumper, undemanding."),
+  P("Cryptocoryne Balansae","Root Feeder","Medium","Optional","Medium","Background","Long crinkled ribbons; loves mature substrate."),
+  P("Cryptocoryne Flamingo","Root Feeder","Medium","Optional","Hard","Midground","Pink cultivar; slow and sensitive to moves."),
+  P("Amazon Sword (bleheri)","Root Feeder Heavy","Medium","No","Easy","Background","Heavy root feeder — tab every 3 months; gets big."),
+  P("Echinodorus Reni","Root Feeder Heavy","Medium","Optional","Medium","Midground","Compact red sword; iron keeps the red."),
+  P("Echinodorus Red Flame","Root Feeder Heavy","Medium","Optional","Medium","Midground","Speckled red; remove oldest leaves to fuel new growth."),
+  P("Echinodorus Ozelot","Root Feeder Heavy","Medium","No","Easy","Background","Spotted; very forgiving."),
+  P("Vallisneria Spiralis","Root Feeder","Low","No","Easy","Background","Runner machine; can carpet a back wall in months."),
+  P("Vallisneria Nana","Root Feeder","Low","No","Easy","Background","Thinner ribbon leaves; less invasive than spiralis."),
+  P("Dwarf Sagittaria","Root Feeder","Medium","No","Easy","Foreground","Grass look without CO2; sends runners everywhere."),
+  P("Nymphaea Lotus Red","Root Feeder Heavy","Medium","No","Easy","Midground","Trim surface pads to keep it bushy below."),
+  P("Crinum Calamistratum","Root Feeder","Low","No","Easy","Background","Curly straps; one of the few plants goldfish ignore."),
+  // Stems
+  P("Rotala Rotundifolia","Water Column Heavy","Medium","Optional","Easy","Background","Pink tips under strong light; trim-and-replant weekly."),
+  P("Rotala Blood Red","Water Column Heavy","High","Yes","Hard","Background","Needs high PAR + iron + nitrate limitation for deep red."),
+  P("Rotala H'ra","Water Column Heavy","High","Optional","Medium","Background","Orange-red; more forgiving than Blood Red."),
+  P("Rotala Green","Water Column Heavy","Medium","Optional","Easy","Background","Fast canopy; great nitrate sponge."),
+  P("Rotala Wallichii","Water Column Heavy","High","Yes","Hard","Background","Needle-leaf pink; soft water only."),
+  P("Ludwigia Repens","Water Column Heavy","Medium","Optional","Easy","Background","Easy red; colours up even without CO2."),
+  P("Ludwigia Arcuata","Water Column Heavy","High","Yes","Medium","Background","Needle orange-red."),
+  P("Ludwigia Super Red Mini","Water Column Heavy","Medium","Optional","Medium","Midground","Compact intense red; iron dependent."),
+  P("Bacopa Caroliniana","Water Column Heavy","Medium","No","Easy","Background","Lemon scent emersed; slow, tidy stem."),
+  P("Bacopa Monnieri","Water Column Heavy","Medium","No","Easy","Background","Very hardy; tolerates hard water well."),
+  P("Hygrophila Polysperma","Water Column Heavy","Low","No","Easy","Background","Nearly unkillable; watch it doesn't shade everything."),
+  P("Hygrophila Corymbosa Siamensis","Water Column Heavy","Medium","No","Easy","Background","Big soft leaves; snack bar for hungry fish."),
+  P("Hygrophila Pinnatifida","Water Column Heavy","Medium","Optional","Medium","Epiphyte","Attaches to wood; fern-like patterned leaves."),
+  P("Limnophila Sessiliflora","Water Column Heavy","Low","No","Easy","Background","Cabomba look without the demands."),
+  P("Limnophila Aromatica","Water Column Heavy","High","Yes","Medium","Background","Purple undersides under high light."),
+  P("Pogostemon Erectus","Water Column Heavy","Medium","Optional","Medium","Background","Conifer-like columns."),
+  P("Pogostemon Stellatus Octopus","Water Column Heavy","Medium","No","Easy","Background","Whirling narrow leaves; fast."),
+  P("Pogostemon Helferi (Downoi)","Root Feeder","High","Yes","Hard","Foreground","Curly star rosettes; hates dirty substrate."),
+  P("Myriophyllum Guyana","Water Column Heavy","Medium","Optional","Medium","Background","Feathery fine texture."),
+  P("Cabomba Caroliniana","Water Column Heavy","Medium","Optional","Medium","Background","Needs decent light or it strings out."),
+  P("Hornwort","Water Column Heavy","Low","No","Easy","Floating/Stem","Float it or plant it; drops needles when moved."),
+  P("Water Wisteria","Water Column Heavy","Medium","No","Easy","Background","Lace leaves; roots from any node."),
+  P("Pearl Weed","Water Column Heavy","Medium","Optional","Medium","Midground","Carpets loosely without CO2, tightly with."),
+  // Carpets
+  P("Monte Carlo","Root Feeder","Medium","Optional","Medium","Carpet","The low-tech carpet of choice; plant in 2 cm plugs."),
+  P("Dwarf Baby Tears (HC Cuba)","Root Feeder","High","Yes","Hard","Carpet","Demands CO2 + high PAR; melts without."),
+  P("Dwarf Hairgrass","Root Feeder","Medium","Optional","Medium","Carpet","Runner grass; trim to 3 cm to densify."),
+  P("Staurogyne Repens","Root Feeder","Medium","Optional","Easy","Foreground","Bushy hedge; pinch tips to spread."),
+  P("Marsilea Hirsuta","Substrate Runner","Low","No","Easy","Carpet","Clover carpet that tolerates low tech — slow but steady."),
+  P("Marsilea Crenata","Substrate Runner","Low","No","Easy","Carpet","Finer than hirsuta; same easy care."),
+  P("Glossostigma","Root Feeder","High","Yes","Hard","Carpet","Classic Amano carpet; high energy only."),
+  // Floaters
+  P("Salvinia Natans","Water Column Heavy","Medium","No","Easy","Floating","Nitrate sponge; keep off half the surface for gas exchange."),
+  P("Amazon Frogbit","Water Column Heavy","Medium","No","Easy","Floating","Long roots shelter shrimplets; thin weekly."),
+  P("Red Root Floater","Water Column Heavy","Medium","No","Easy","Floating","Roots blush red under strong light + iron."),
+  P("Dwarf Water Lettuce","Water Column Heavy","Medium","No","Easy","Floating","Fast; protect from lid condensation drip."),
+  P("Duckweed","Water Column Heavy","Low","No","Easy","Floating","Ultimate nutrient export — impossible to fully remove, be sure.")
+];
+function bootSettings() {
+  const t = Store.tank();
+  $("#setName").value = t.display_name;
+  $("#setVol").value = t.dimensions.volume_litres;
+  $("#setSub").value = t.substrate_matrix.base_layer;
+  $("#setFilter").value = t.hardware_tier.filtration.type;
+  $("#setFlow").value = t.hardware_tier.filtration.turnover_lph;
+  // Species picker: grouped by category, live-filtered by the search box.
+  const fillSpecies = (q = "") => {
+    q = q.toLowerCase();
+    const groups = {};
+    SPECIES_DB.forEach((x, i) => {
+      if (q && !(x.s + " " + x.c).toLowerCase().includes(q)) return;
+      (groups[x.c] ??= []).push(`<option value="${i}">${x.s}</option>`);
+    });
+    $("#addSpecies").innerHTML = Object.entries(groups)
+      .map(([g, opts]) => `<optgroup label="${g}">${opts.join("")}</optgroup>`).join("")
+      || `<option disabled>No match</option>`;
+  };
+  fillSpecies();
+  $("#speciesSearch").addEventListener("input", e => fillSpecies(e.target.value));
+  // Every input binds straight into Store.commit → alert bounds, dosing math
+  // and localStorage all refresh in the same tick.
+  $("#setName").addEventListener("change", e =>
+    Store.commit("cfg", s => s.universal_tank_instance.display_name = e.target.value.trim() || "Unnamed Tank"));
+  $("#setVol").addEventListener("change", e =>
+    Store.commit("cfg", s => s.universal_tank_instance.dimensions.volume_litres = Math.max(1, parseFloat(e.target.value) || 58)));
+  $("#setSub").addEventListener("change", e =>
+    Store.commit("cfg", s => {
+      s.universal_tank_instance.substrate_matrix.base_layer = e.target.value;
+      s.universal_tank_instance.substrate_matrix.added_at = Store.now(); // new substrate resets the age clock
+    }));
+  $("#setFilter").addEventListener("change", e =>
+    Store.commit("cfg", s => s.universal_tank_instance.hardware_tier.filtration.type = e.target.value));
+  $("#setFlow").addEventListener("change", e =>
+    Store.commit("cfg", s => s.universal_tank_instance.hardware_tier.filtration.turnover_lph = Math.max(0, parseFloat(e.target.value) || 0)));
+  $("#btnAddSpecies").addEventListener("click", () => {
+    const x = SPECIES_DB[+$("#addSpecies").value];
+    if (!x) return;
+    const n = Math.max(1, parseInt($("#addCount").value) || 1);
+    Store.commit("cfg", s => s.universal_tank_instance.livestock_array.push({
+      species: x.s, count: n,
+      type: x.c.startsWith("Fish") ? "Fish" : "Invertebrate",
+      profile: x.p,
+      sensitivity: Targets.PROFILES[x.p].sensitivity
+    }));
+    toast("Species added — parameter envelope recalculated");
+  });
+}
+function renderLivestockCfg(s) {
+  const t = Targets.forTank(Store.tank());
+  $("#livestockRows").innerHTML = Store.tank().livestock_array.map((l, i) =>
+    `<div class="live-row"><span>${l.type === "Fish" ? "🐟" : "🦐"}</span>
+      <div><strong style="font-size:12.5px">${l.species}</strong>
+      <div class="faint">×${l.count} · ${Targets.PROFILES[l.profile]?.label ?? "custom"} · sensitivity ${l.sensitivity}</div></div>
+      <button class="btn x" data-rm="${i}">✕</button></div>`).join("")
+    || `<p class="faint">Tank is fallow — community defaults active.</p>`;
+  $$("#livestockRows [data-rm]").forEach(b => b.addEventListener("click", () =>
+    Store.commit("cfg", st => st.universal_tank_instance.livestock_array.splice(+b.dataset.rm, 1))));
+  $("#envPreview").innerHTML =
+    (t.conflict ? `<div class="banner warn">⚠ Profile conflict: resident species prefer non-overlapping water.
+       The envelope has been clamped — consider separating soft-water and hard-water species.</div>` : "") +
+    `<span class="chip hot">pH ${t.ph[0]}–${t.ph[1]}</span><span class="chip hot">GH ${t.gh[0]}–${t.gh[1]}</span>
+     <span class="chip hot">KH ${t.kh[0]}–${t.kh[1]}</span><span class="chip hot">TDS ${t.tds[0]}–${t.tds[1]}</span>
+     <span class="chip hot">${t.tempC[0]}–${t.tempC[1]} °C</span><span class="chip hot">NO₃ ≤ ${t.nitrateMax}</span>`;
+}
+
+/* ---- Ecosystem Trend Analyzer (lightweight SVG renderer) ---- */
+const TREND_TABS = [["tds", "TDS ppm"], ["nitrate", "Nitrate NO₃"], ["ph", "pH"], ["temp", "Temp °C"]];
+function renderTrend(s) {
+  $("#trendTabs").innerHTML = TREND_TABS.map(([k, l]) =>
+    `<button class="${s.trendTab === k ? "on" : ""}" data-trend="${k}">${l}</button>`).join("");
+  $$("#trendTabs [data-trend]").forEach(b => b.addEventListener("click", () =>
+    Store.commit("trend", st => { st.trendTab = b.dataset.trend; })));
+  const key = s.trendTab;
+  const data = s.readings.map(r => ({ at: r.at, v: r[key] })).filter(d => Number.isFinite(d.v));
+  const svg = $("#trendSvg"), W = 720, H = 220, P = { l: 44, r: 14, t: 12, b: 24 };
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  if (data.length < 2) {
+    svg.innerHTML = "";
+    $("#trendEmpty").textContent = `Commit at least two readings to draw the ${key.toUpperCase()} trend.`;
+    return;
+  }
+  $("#trendEmpty").textContent = "";
+  // Vertical axis auto-scales to the logged min/max so drift is obvious.
+  let lo = Math.min(...data.map(d => d.v)), hi = Math.max(...data.map(d => d.v));
+  if (hi - lo < 1e-9) { hi += 1; lo -= 1; }             // flat-line guard
+  const pad = (hi - lo) * 0.15; lo -= pad; hi += pad;   // 15% breathing room
+  const x0 = data[0].at, x1 = data[data.length - 1].at;
+  const X = t => P.l + (t - x0) / Math.max(1, x1 - x0) * (W - P.l - P.r);
+  const Y = v => H - P.b - (v - lo) / (hi - lo) * (H - P.t - P.b);
+  let grid = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + (hi - lo) * i / 4, y = Y(v);
+    grid += `<line class="gridline" x1="${P.l}" y1="${y}" x2="${W - P.r}" y2="${y}"/><text x="4" y="${y + 3}">${v.toFixed(1)}</text>`;
+  }
+  const pts = data.map(d => `${X(d.at).toFixed(1)},${Y(d.v).toFixed(1)}`).join(" ");
+  const dots = data.map(d =>
+    `<circle class="dot" r="3.4" cx="${X(d.at).toFixed(1)}" cy="${Y(d.v).toFixed(1)}">
+       <title>${new Date(d.at).toLocaleDateString()} — ${d.v}</title></circle>`).join("");
+  svg.innerHTML = grid +
+    `<polyline class="line" points="${pts}"/>` + dots +
+    `<text x="${P.l}" y="${H - 6}">${new Date(x0).toLocaleDateString()}</text>
+     <text x="${W - P.r - 60}" y="${H - 6}">${new Date(x1).toLocaleDateString()}</text>`;
+}
+
+/* ---- Gestation predictor ---- */
+$("#btnBerried").addEventListener("click", () => {
+  Store.commit("berried", s => s.berried.push({ id: crypto.randomUUID(), at: Store.now(), tempC: s.current.temp }));
+  toast("🥚 Berried female logged at " + Store.get().current.temp + " °C");
+});
+function renderGestation(s) {
+  if (!s.berried.length) {
+    $("#gestList").innerHTML = `<p class="faint">No berried females logged — use "🥚 Log Berried Female" in the Livestock panel when you spot eggs.</p>`;
+    return;
+  }
+  const hot = s.current.temp > GestationEngine.HIGH_TEMP_C;
+  $("#gestList").innerHTML = s.berried.map(b => {
+    const d = GestationEngine.describe(b);
+    return `<div class="gest">
+      <div class="row spread"><strong style="font-size:13px">🥚 Clutch logged @ ${b.tempC} °C · D = 200/(T−14.2) = ${d.D} days</strong>
+        <span class="faint">${d.daysLeft > 0 ? `${d.daysLeft} d to hatch — ${new Date(d.hatchAt).toLocaleDateString()}` : "🐣 Hatch window open!"}</span></div>
+      <div class="bar"><i style="width:${d.pct.toFixed(1)}%"></i></div>
+      <div class="row spread" style="margin-top:8px"><span class="faint">${d.pct.toFixed(0)}% incubated</span>
+        <button class="btn" data-hatch="${b.id}">Clear</button></div>
+    </div>`;
+  }).join("") + (hot ? `<div class="banner warn">⚠ High Temperature Alert: Current temperature speeds up egg
+    development but significantly lowers newborn shrimplet survival rates. Consider reducing target heater
+    parameters to 22°C to maximize survival mechanics.</div>` : "");
+  $$("[data-hatch]").forEach(b => b.addEventListener("click", () =>
+    Store.commit("berried", st => { st.berried = st.berried.filter(x => x.id !== b.dataset.hatch); })));
+}
+
+/* ---- Substrate buffering widget ---- */
+function renderSubstrate(s) {
+  const st = SubstrateEngine.status(s);
+  $("#substrateWidget").innerHTML =
+    st.key === "EXHAUSTED"
+      ? `<div class="banner danger">⚠ Substrate Exhaustion Warning: Active soil ion-exchange capacity is depleting
+         (pH +${st.dPH.toFixed(2)} with KH +${st.dKH.toFixed(1)} over 30 days at soil age ${st.age} d). Buffering
+         activity is dropping. Plan for target parameter drift or localized soil replacement patches.</div>`
+      : st.key === "NA"
+      ? `<p class="muted">Inert substrate selected — no active buffering expected, monitor disabled.</p>`
+      : `<div class="banner ok">Status: Active Buffering Nominal</div>
+         <p class="faint">Soil age: ${st.age} days · leach profile ${Store.tank().substrate_matrix.leach_profile} ·
+         exhaustion monitor arms after 365 days.</p>`;
+}
+
+/* ---- Maintenance mode + export ---- */
+$("#maintSwitch").addEventListener("change", e => {
+  Store.commit("maint", s => { s.maintenanceUntil = e.target.checked ? Date.now() + MaintenanceMode.WINDOW_MS : 0; });
+  toast(e.target.checked ? "🧤 Maintenance mode — hardware alarms muted for 30 min" : "Maintenance over — alarms re-armed");
+});
+function renderMaint(s) {
+  const on = MaintenanceMode.active(s);
+  $("#maintSwitch").checked = on;
+  $("#maintLabel").textContent = on ? `MAINT · ${MaintenanceMode.remainingMin(s)}m` : "MAINT OFF";
+}
+$("#btnExport").addEventListener("click", () => {
+  const blob = new Blob([JSON.stringify(Store.get(), null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "aquakeep-backup-" + new Date().toISOString().slice(0, 10) + ".json";
+  a.click(); URL.revokeObjectURL(a.href);
+  toast("💾 Full state exported as .json backup");
+});
+
+/* ---- Pest & algae triage ---- */
+const selectedSyms = new Set();
+function bootSymptoms() {
+  $("#symGrid").innerHTML = Object.entries(PestEngine.SYMPTOMS).map(([k, v]) =>
+    `<div class="sym" data-sym="${k}">${v.tag}</div>`).join("");
+  $$("#symGrid .sym").forEach(el => el.addEventListener("click", () => {
+    const k = el.dataset.sym;
+    selectedSyms.has(k) ? selectedSyms.delete(k) : selectedSyms.add(k);
+    el.classList.toggle("on");
+    renderDiagCards();
+  }));
+}
+function renderDiagCards() {
+  $("#diagCards").innerHTML = [...selectedSyms].map(k => {
+    const d = PestEngine.SYMPTOMS[k];
+    return `<div class="diag-card"><h4>🎯 Target identified: ${d.pest}</h4>
+      <div class="risk">Core risk: ${d.risk}</div>
+      <strong style="font-size:11px;letter-spacing:.08em;color:var(--ink-dim)">ZERO-CHEMICAL LOW-TECH ACTION PLAN</strong>
+      <ol>${d.plan.map(p => `<li>${p}</li>`).join("")}</ol></div>`;
+  }).join("");
+}
+
+/* ---- Flora library ---- */
+function renderFlora(q = "") {
+  q = q.toLowerCase();
+  $("#plantGrid").innerHTML = PLANT_DB
+    .filter(p => !q || (p.n + " " + p.place + " " + p.light + " " + p.diff + " " + p.feed).toLowerCase().includes(q))
+    .map(p => `<div class="plant-card">
+      <h4>🌿 ${p.n}</h4>
+      <div class="badges">
+        <span class="b light-${p.light}">☀ ${p.light} light</span>
+        <span class="b co2-${p.co2}">CO₂ ${p.co2}</span>
+        <span class="b diff-${p.diff}">${p.diff}</span>
+        <span class="b">${p.place}</span>
+        <span class="b">${p.feed}</span>
+      </div>
+      <p>${p.note}</p>
+      <button class="btn" data-addplant="${p.n}">+ Add to tank</button>
+    </div>`).join("");
+}
+function bootFlora() {
+  renderFlora();
+  $("#plantSearch").addEventListener("input", e => renderFlora(e.target.value));
+  $("#plantGrid").addEventListener("click", e => {
+    const name = e.target?.dataset?.addplant;
+    if (!name) return;
+    const p = PLANT_DB.find(x => x.n === name);
+    Store.commit("cfg", s => s.universal_tank_instance.flora_array.push(
+      { name: p.n, feeding_type: p.feed, light: p.light, co2: p.co2, placement: p.place }));
+    toast(`🌿 ${p.n} added to the tank instance`);
+  });
+}
+
+/* ---- Plant Doctor: photo scanner + symptom knowledge base ---- */
+const PlantDoctor = {
+  SYMPTOMS: {
+    oldYellow: { tag: "Yellowing on OLD leaves first", dx: "Nitrogen shortage (mobile nutrient)",
+      plan: ["Old leaves are sacrificed first because N is mobile — confirm nitrate is reading near 0.",
+             "Ease feeding/dosing balance: in a shrimp-safe tank raise NO₃ to ~5–10 ppm via a nitrogen-only fert at ½ dose.",
+             "Remove exhausted leaves so the plant redirects energy."] },
+    newPale: { tag: "Pale / white NEW growth", dx: "Iron deficiency (immobile nutrient)",
+      plan: ["New tips pale first because Fe cannot be relocated — classic interveinal chlorosis.",
+             "Dose chelated iron (DTPA for pH < 7) at ¼ label strength twice weekly.",
+             "Check KH: above ~6 °d iron locks out quickly after dosing."] },
+    pinholes: { tag: "Pinholes in older leaves", dx: "Potassium deficiency",
+      plan: ["Pinholes that spread and yellow at the rim are the K signature.",
+             "Add a potassium-only supplement (K₂SO₄) — safe for shrimp at label dose.",
+             "Root feeders: push a root tab beneath the crown instead."] },
+    twisted: { tag: "Twisted / stunted new growth", dx: "Calcium / GH deficiency",
+      plan: ["Distorted new tips track low calcium — common in RO-heavy shrimp tanks.",
+             "Raise GH one degree with a Ca-rich remineralizer in the next water-change bucket.",
+             "Cuttlebone in the filter is a slow-release fallback that also helps snail shells."] },
+    melt: { tag: "Leaves turning translucent / melting", dx: "Acclimation or crypt melt",
+      plan: ["Emersed-grown nursery leaves often melt underwater — normal for crypts and swords.",
+             "Trim mush promptly so ammonia from decay doesn't spike (your blocker will catch it).",
+             "Leave roots alone: new adapted leaves usually appear within 2–3 weeks."] },
+    gsa: { tag: "Hard green spots on glass & slow leaves", dx: "Green Spot Algae — phosphate shortage",
+      plan: ["GSA on Anubias = light too long + PO₄ near zero.",
+             "Trim the smart-plug photoperiod by 1 h and dose a trace of phosphate.",
+             "Scrape glass with a razor; old spots never fade on their own."] },
+    bbaLink: { tag: "Black/grey tufts on leaf edges", dx: "Black Brush Algae (see IoT triage)",
+      plan: ["This is the BBA playbook from the pest module — organics + unstable flow.",
+             "Spot-dose 3% H₂O₂ (1 ml / 10 L) on tufts with the filter paused.",
+             "Rinse filter media in siphoned tank water and shorten the photoperiod to 6 h."] }
+  },
+  /** Colour classifier for a sampled leaf region (white-balanced RGB). */
+  classify([r, g, b]) {
+    const lum = (r + g + b) / 3;
+    if (lum < 60)  return { key: "dark", verdict: "Very dark/necrotic tissue — likely dead patch or deep shade. Trim and re-sample a mid-tone area." };
+    if (g > r * 1.12 && g > b * 1.25) return { key: "healthy", verdict: "Healthy chlorophyll density — tissue reads strong green. No colour-level deficiency detected." };
+    if (Math.abs(r - g) < r * 0.18 && b < g * 0.65) return { key: "chlorosis", verdict: "Yellow shift detected (chlorosis). Cross-check the symptom toggles: old leaves → nitrogen, new tips → iron." };
+    if (lum > 190) return { key: "pale", verdict: "Washed-out pale tissue — consistent with iron deficiency on new growth, or light-bleaching directly under the LED." };
+    if (r > g * 1.15) return { key: "red", verdict: "Red/brown dominance — either a red cultivar doing its job, or diatom coating on a green plant (wipe a leaf and re-sample)." };
+    return { key: "mixed", verdict: "Mixed signal — sample a single leaf area away from shadows and hardscape, ideally near the crosshair centre." };
+  }
+};
+const PVis = { img: null };
+const plantCanvas = $("#plantCanvas");
+const pctx = plantCanvas.getContext("2d", { willReadFrequently: true });
+function drawPlant() {
+  pctx.fillStyle = "#060a0c"; pctx.fillRect(0, 0, plantCanvas.width, plantCanvas.height);
+  if (PVis.img) {
+    const r = Math.min(plantCanvas.width / PVis.img.width, plantCanvas.height / PVis.img.height);
+    pctx.drawImage(PVis.img, (plantCanvas.width - PVis.img.width * r) / 2,
+      (plantCanvas.height - PVis.img.height * r) / 2, PVis.img.width * r, PVis.img.height * r);
+  } else {
+    pctx.fillStyle = "rgba(255,255,255,0.25)"; pctx.font = "600 28px sans-serif"; pctx.textAlign = "center";
+    pctx.fillText("📷 Scan Leaf Photo to begin diagnosis", plantCanvas.width / 2, plantCanvas.height / 2);
+    pctx.textAlign = "start";
+  }
+}
+$("#plantFile").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = new Image();
+  img.onload = () => { PVis.img = img; drawPlant(); $("#plantHint").textContent = "Photo loaded — click the worst leaf tissue."; };
+  img.src = URL.createObjectURL(f);
+});
+plantCanvas.addEventListener("click", e => {
+  if (!PVis.img) { toast("Load a leaf photo first"); return; }
+  const box = plantCanvas.getBoundingClientRect();
+  const x = (e.clientX - box.left) * plantCanvas.width / box.width;
+  const y = (e.clientY - box.top) * plantCanvas.height / box.height;
+  const d = pctx.getImageData(Math.max(0, x - 5), Math.max(0, y - 5), 10, 10).data;
+  let R = 0, G = 0, B = 0, n = 0;
+  for (let i = 0; i < d.length; i += 4) { R += d[i]; G += d[i + 1]; B += d[i + 2]; n++; }
+  const rgb = [Math.round(R / n), Math.round(G / n), Math.round(B / n)];
+  drawPlant();
+  pctx.strokeStyle = "#00E676"; pctx.lineWidth = 3;
+  pctx.beginPath(); pctx.arc(x, y, 16, 0, 7); pctx.stroke();
+  pctx.beginPath(); pctx.moveTo(x - 26, y); pctx.lineTo(x + 26, y); pctx.moveTo(x, y - 26); pctx.lineTo(x, y + 26); pctx.stroke();
+  const c = PlantDoctor.classify(rgb);
+  $("#leafVerdict").innerHTML = `<div class="banner ${c.key === "healthy" ? "ok" : "warn"}">
+    <span class="swatch" style="display:inline-grid;width:22px;height:22px;vertical-align:middle;margin-right:8px;background:rgb(${rgb.join(",")})"></span>
+    ${c.verdict}</div>`;
+});
+const plantSyms = new Set();
+function bootPlantDoctor() {
+  drawPlant();
+  $("#plantSymGrid").innerHTML = Object.entries(PlantDoctor.SYMPTOMS).map(([k, v]) =>
+    `<div class="sym" data-psym="${k}">${v.tag}</div>`).join("");
+  $$("#plantSymGrid .sym").forEach(el => el.addEventListener("click", () => {
+    const k = el.dataset.psym;
+    plantSyms.has(k) ? plantSyms.delete(k) : plantSyms.add(k);
+    el.classList.toggle("on");
+    $("#plantDiagCards").innerHTML = [...plantSyms].map(key => {
+      const d = PlantDoctor.SYMPTOMS[key];
+      return `<div class="diag-card"><h4>🩺 ${d.dx}</h4>
+        <strong style="font-size:11px;letter-spacing:.08em;color:var(--ink-dim)">LOW-TECH ACTION PLAN</strong>
+        <ol>${d.plan.map(p => `<li>${p}</li>`).join("")}</ol></div>`;
+    }).join("");
+  }));
+}
+
+/* ---- IoT camera stream connect ---- */
+function renderStream(s) {
+  const url = s.hardware.streamUrl;
+  const v = $("#rtspVideo"), im = $("#mjpegView"), ph = $("#streamPlaceholder");
+  if (!url) {
+    ph.style.display = "grid"; v.style.display = "none"; im.style.display = "none";
+    if (v.dataset.cur) { v.removeAttribute("src"); v.dataset.cur = ""; }
+    if (im.dataset.cur) { im.removeAttribute("src"); im.dataset.cur = ""; }
+    return;
+  }
+  ph.style.display = "none";
+  const isMjpeg = /mjpe?g|\.cgi|action=stream/i.test(url);
+  if (isMjpeg) {
+    v.style.display = "none"; im.style.display = "block";
+    if (im.dataset.cur !== url) { im.src = url; im.dataset.cur = url; }
+  } else {
+    im.style.display = "none"; v.style.display = "block";
+    if (v.dataset.cur !== url) { v.src = url; v.dataset.cur = url; v.play?.().catch(() => {}); }
+  }
+}
+$("#btnConnectCam").addEventListener("click", () => {
+  // Empty field = assume the setup-camera.sh localhost gateway default.
+  const url = $("#streamUrl").value.trim() || "http://127.0.0.1:1984/api/stream.mp4?src=tank";
+  $("#streamUrl").value = url;
+  Store.commit("hw", s => { s.hardware.streamUrl = url; });
+  toast("📡 Stream connected — decoding in-browser");
+});
+$("#btnDisconnectCam").addEventListener("click", () => {
+  Store.commit("hw", s => { s.hardware.streamUrl = ""; });
+});
+
+/* ---- Flora configurator (add/remove plants in the tank instance) ---- */
+function renderFloraCfg(s) {
+  $("#floraRows").innerHTML = Store.tank().flora_array.map((f, i) =>
+    `<div class="live-row"><span>🌿</span>
+      <div><strong style="font-size:12.5px">${f.name}</strong>
+      <div class="faint">${f.feeding_type}${f.attached_to ? " · on " + f.attached_to : ""}${f.placement ? " · " + f.placement : ""}</div></div>
+      <button class="btn x" data-rmp="${i}">✕</button></div>`).join("")
+    || `<p class="faint">No plants in the tank yet.</p>`;
+  $$("#floraRows [data-rmp]").forEach(b => b.addEventListener("click", () =>
+    Store.commit("cfg", st => { st.universal_tank_instance.flora_array.splice(+b.dataset.rmp, 1); toast("Plant removed"); })));
+}
+
+/* ================================================================
+   PART B3 — MATCH ENGINE (compatibility tinder)
+   ================================================================ */
+/** Minimum tank volume (litres) per species — keyword rules over the DB. */
+function minTankL(name, cat) {
+  // Invertebrates first — prevents keyword collisions ("Ramshorn" vs "ram").
+  if (cat.startsWith("Shrimp") || cat === "Snails") return 10;
+  const n = name.toLowerCase();
+  const RULES = [
+    // Specific overrides MUST precede generic family keywords.
+    ["pygmy", 40], ["habrosus", 40], ["hastatus", 40], ["celestial pearl", 30],
+    ["frontosa", 500], ["oscar", 400], ["clown loach", 400], ["altum", 300], ["discus", 300],
+    ["severum", 250], ["acei", 250], ["angelfish", 200], ["denison", 200], ["boesemani", 200],
+    ["turquoise rainbow", 200], ["peacock", 200], ["yellow lab", 200], ["demasoni", 200],
+    ["red zebra", 200], ["kissing", 200], ["congo tetra", 150], ["yoyo", 150], ["firemouth", 150],
+    ["electric blue acara", 150], ["three-spot", 120], ["opaline", 120], ["gold gourami", 120],
+    ["convict", 100], ["keyhole", 100], ["moonlight", 100], ["pearl gourami", 100], ["rosy barb", 100],
+    ["swordtail", 100], ["sailfin", 100], ["siamese algae", 100], ["flying fox", 100],
+    ["bleeding heart", 100], ["paradise", 80], ["kribensis", 80], ["bristlenose", 80],
+    ["golden wonder", 80], ["hatchetfish", 80], ["tiger barb", 80], ["odessa", 80],
+    ["zebra loach", 80], ["rubber-lip", 80], ["whiptail", 80], ["twig", 80], ["rummy-nose", 80],
+    ["diamond tetra", 80], ["bloodfin", 80], ["neon dwarf rainbow", 80],
+    ["molly", 60], ["corydoras", 60], ["kuhli", 60], ["dwarf chain", 60], ["hillstream", 60],
+    ["german blue ram", 60], ["electric blue ram", 60], ["gold ram", 60], ["bolivian ram", 60],
+    ["zebra pleco", 60], ["clown pleco", 60], ["zebra danio", 60], ["leopard danio", 60],
+    ["pearl danio", 60], ["cardinal tetra", 60], ["black neon", 60], ["serpae", 60], ["x-ray", 60],
+    ["celebes", 60], ["ram", 60], ["lemon tetra", 60], ["black phantom", 60], ["red phantom", 60],
+    ["glowlight tetra", 60], ["silver-tip", 60], ["chocolate gourami", 50], ["apistogramma", 50],
+    ["neon tetra", 50], ["harlequin", 50], ["green neon", 40], ["lambchop", 40], ["kubotai", 40],
+    ["glowlight danio", 40], ["white cloud", 40],
+    ["otocinclus", 40], ["honey", 40], ["dwarf gourami", 40], ["flame dwarf", 40], ["powder blue", 40],
+    ["platy", 40], ["gardneri", 40], ["forktail", 40], ["threadfin", 40], ["pencilfish", 40],
+    ["pea puffer", 40], ["badis badis", 40], ["goby", 40], ["gold barb", 60], ["cherry barb", 40],
+    ["checker barb", 40], ["rosy loach", 40], ["guppy", 30], ["licorice", 30],
+    ["endler", 25], ["ember", 25], ["least killifish", 20], ["chili", 20], ["phoenix", 20],
+    ["maculata", 20], ["betta", 20], ["sparkling", 20], ["scarlet badis", 20], ["clown killi", 20]
+  ];
+  for (const [k, v] of RULES) if (n.includes(k)) return v;
+  return 60; // conservative default for unlisted fish
+}
+
+const MatchEngine = {
+  /** Livestock: closeness of the species envelope to LIVE water readings,
+      gated by tank volume and discounted hard if it can't overlap the
+      resident envelope. */
+  scoreSpecies(x) {
+    const prof = Targets.PROFILES[x.p], c = Store.get().current;
+    const vol = Store.tank().dimensions.volume_litres;
+    const minL = minTankL(x.s, x.c);
+    const checks = [["ph", c.ph], ["gh", c.gh], ["kh", c.kh], ["tds", c.tds], ["tempC", c.temp]];
+    let score = 0; const reasons = [];
+    for (const [k, v] of checks) {
+      const [lo, hi] = prof[k];
+      if (v >= lo && v <= hi) { score += 1; continue; }
+      const d = v < lo ? lo - v : v - hi;
+      const rel = d / Math.max(1e-6, hi - lo);
+      score += Math.max(0, 1 - rel);
+      reasons.push(`${k === "tempC" ? "Temp" : k.toUpperCase()} ${v} vs ideal ${lo}–${hi}`);
+    }
+    const res = Targets.forTank(Store.tank());
+    const overlaps = ["ph", "gh", "tds"].every(k =>
+      Math.max(prof[k][0], res[k][0]) <= Math.min(prof[k][1], res[k][1]));
+    if (!overlaps) reasons.unshift("⚠ No water overlap with your current residents");
+    let pct = Math.round(score / checks.length * 100 * (overlaps ? 1 : 0.4));
+    let tooBig = false;
+    if (vol < minL) { tooBig = true; pct = Math.min(pct, 15); reasons.unshift(`Needs ≥ ${minL} L — this tank is ${vol} L`); }
+    return { pct, reasons, prof, minL, tooBig };
+  },
+  /** Plants: scored against hardware tier + substrate, not water chemistry. */
+  scorePlant(p) {
+    const hw = Store.tank().hardware_tier, sub = Store.tank().substrate_matrix.base_layer;
+    let score = 100; const reasons = [];
+    const rank = { Low: 0, Medium: 1, High: 2 };
+    const deficit = rank[p.light] - (rank[hw.lighting.par_output] ?? 0);
+    if (deficit > 0) { score -= 35 * deficit; reasons.push(`Needs ${p.light} light — tank is ${hw.lighting.par_output} PAR`); }
+    if (p.co2 === "Yes" && !hw.co2_injection) { score -= 40; reasons.push("Requires CO₂ injection — tank has none"); }
+    if (p.co2 === "Optional" && !hw.co2_injection) { score -= 10; reasons.push("Happier with CO₂ (optional)"); }
+    if (p.feed.startsWith("Root") && sub === "Bare Bottom") { score -= 30; reasons.push("Root feeder vs bare-bottom tank"); }
+    if (p.feed.startsWith("Root") && sub === "Active Soil") { score += 5; reasons.push("Active soil feeds the roots — bonus"); }
+    if (p.diff === "Hard") { score -= 10; reasons.push("Demanding species"); }
+    return { pct: Math.max(0, Math.min(100, Math.round(score))), reasons };
+  }
+};
+
+/* ---- Stocking Recommendations (ranked lists, volume-aware) ---- */
+const RecState = { liveLimit: 10, plantLimit: 10 };
+function recPools() {
+  const inTankL = new Set(Store.tank().livestock_array.map(l => l.species));
+  const live = SPECIES_DB
+    .filter(x => !inTankL.has(x.s))
+    .map(x => ({ kind: "live", name: x.s, cat: x.c, ref: x, score: MatchEngine.scoreSpecies(x) }))
+    .filter(r => !r.score.tooBig)                      // hard-exclude oversized species
+    .sort((a, b) => b.score.pct - a.score.pct);
+  const inTankP = new Set(Store.tank().flora_array.map(f => f.name));
+  const plant = PLANT_DB
+    .filter(p => !inTankP.has(p.n))
+    .map(p => ({ kind: "plant", name: p.n, cat: `${p.place} · ${p.light} light · CO₂ ${p.co2}`, ref: p, score: MatchEngine.scorePlant(p) }))
+    .sort((a, b) => b.score.pct - a.score.pct);
+  return { live, plant };
+}
+function recEmoji(r) {
+  if (r.kind === "plant") return "🌿";
+  if (r.cat.startsWith("Shrimp")) return "🦐";
+  if (r.cat === "Snails") return "🐌";
+  return "🐟";
+}
+function recRow(r) {
+  const cls = r.score.pct >= 80 ? "s-hi" : r.score.pct >= 55 ? "s-mid" : "s-lo";
+  const chips = r.kind === "live"
+    ? `<span class="chip">≥ ${r.score.minL} L</span><span class="chip">pH ${r.score.prof.ph[0]}–${r.score.prof.ph[1]}</span>
+       <span class="chip">TDS ${r.score.prof.tds[0]}–${r.score.prof.tds[1]}</span>
+       <span class="chip">${r.score.prof.tempC[0]}–${r.score.prof.tempC[1]} °C</span>`
+    : `<span class="chip">${r.ref.diff}</span><span class="chip">${r.ref.feed}</span>`;
+  return `<div class="rec-row">
+    <div class="rec-score ${cls}">${r.score.pct}%</div>
+    <div style="flex:1">
+      <strong style="font-size:13px">${recEmoji(r)} ${r.name}</strong>
+      <div class="faint">${r.cat}</div>
+      <div style="margin-top:4px">${chips}</div>
+      ${r.score.reasons.length ? `<div class="why mt" style="margin-top:6px">${r.score.reasons.slice(0, 2).join(" · ")}</div>` : ""}
+    </div>
+    <button class="btn" data-recadd="${r.kind}:${r.name}">+ Add</button>
+  </div>`;
+}
+function renderRecs() {
+  const { live, plant } = recPools();
+  $("#recVol").textContent = `your ${Store.tank().dimensions.volume_litres} L tank`;
+  $("#recLive").innerHTML = live.slice(0, RecState.liveLimit).map(recRow).join("")
+    || `<p class="faint">Nothing left to recommend — the whole compatible library is already in your tank.</p>`;
+  $("#recPlant").innerHTML = plant.slice(0, RecState.plantLimit).map(recRow).join("");
+  $("#btnMoreLive").style.display = live.length > RecState.liveLimit ? "" : "none";
+  $("#btnMorePlant").style.display = plant.length > RecState.plantLimit ? "" : "none";
+  $$("[data-recadd]").forEach(b => b.addEventListener("click", () => {
+    const [kind, ...rest] = b.dataset.recadd.split(":"); const name = rest.join(":");
+    Store.commit("cfg", st => {
+      if (kind === "live") {
+        const x = SPECIES_DB.find(q => q.s === name); if (!x) return;
+        st.universal_tank_instance.livestock_array.push({
+          species: x.s, count: x.c.startsWith("Shrimp") ? 10 : 6,
+          type: x.c.startsWith("Fish") ? "Fish" : "Invertebrate",
+          profile: x.p, sensitivity: Targets.PROFILES[x.p].sensitivity });
+      } else {
+        const p = PLANT_DB.find(q => q.n === name); if (!p) return;
+        st.universal_tank_instance.flora_array.push({ name: p.n, feeding_type: p.feed, light: p.light, co2: p.co2, placement: p.place });
+      }
+    });
+    toast(`Added ${name} — envelope & schedules recalculated`);
+  }));
+}
+$("#btnMoreLive").addEventListener("click", () => { RecState.liveLimit += 10; renderRecs(); });
+$("#btnMorePlant").addEventListener("click", () => { RecState.plantLimit += 10; renderRecs(); });
+
+/* ================================================================
+   PART D — MASTER RENDER LOOP + BOOT
+   ================================================================ */
+function renderAll() {
+  const s = Store.get();
+  HealthEngine.apply(HealthEngine.evaluate(s));
+  renderDashboard(s); renderBlocker(s); renderDiet(); renderLeaves(s); renderSchedule(); renderIoT(s);
+  renderShock(s); renderTrend(s); renderSubstrate(s); renderGestation(s); renderLivestockCfg(s); renderMaint(s);
+  renderFloraCfg(s); renderStream(s); renderRecs();
+}
+Store.on("*", renderAll);
+renderSliders(Store.get());
+bootSettings();
+bootSymptoms();
+bootFlora();
+bootPlantDoctor();
+drawVis();
+$("#streamUrl").value = Store.get().hardware.streamUrl || "";
+renderAll();
+/* Background tick: decay phases, gestation bars, maintenance countdown — every 30 s. */
+setInterval(renderAll, 30000);
+
+/* ================================================================
+   PART E — PWA SHELL (installable, offline-first)
+   ================================================================ */
+/* E1. Web manifest — generated inline and streamed as a Blob asset so the
+   single-file build stays installable without a separate manifest.json. */
+const MANIFEST = {
+  name: "AquaKeep — Universal Aquarium Ecosystem",
+  short_name: "AquaKeep",
+  description: "Offline-first aquarium management with predictive water chemistry.",
+  id: "aquakeep",
+  start_url: ".",
+  scope: ".",
+  display: "standalone",             // hides browser chrome → native app feel
+  orientation: "portrait-primary",   // tank logging is one-handed; lock portrait
+  background_color: "#0B1114",       // Android/iOS splash canvas colour
+  theme_color: "#0B1114",            // status-bar / app-bar tint on both platforms
+  icons: [{
+    src: "data:image/svg+xml," + encodeURIComponent(
+      "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+      "<rect width='100' height='100' rx='22' fill='#0B1114'/>" +
+      "<text x='50' y='68' font-size='52' text-anchor='middle'>🌿</text></svg>"),
+    sizes: "any", type: "image/svg+xml", purpose: "any"
+  }]
+};
+const mLink = document.createElement("link");
+mLink.rel = "manifest";
+mLink.href = URL.createObjectURL(new Blob([JSON.stringify(MANIFEST)], { type: "application/manifest+json" }));
+document.head.appendChild(mLink);
+
+/* E2. Service worker — "Cache First, Network Fallback". Browsers refuse to
+   boot a SW from a Blob URL (same-origin file rule), so the fully documented
+   source ships embedded below; Tank Settings → "Download sw.js" writes it
+   next to this HTML when you self-host. */
+const SW_SOURCE = `/* AquaKeep service worker — Cache First, Network Fallback.
+   Strategy: the entire app shell is pre-cached at install, every GET is
+   answered from cache first (zero-Wi-Fi tankside operation), the network is
+   touched only on a cache miss, and successful responses are cached
+   as-you-go so the shell heals itself after updates. */
+const CACHE = "aquakeep-shell-v1";
+const SHELL = ["./", "./index.html"];
+
+self.addEventListener("install", (e) => {
+  // Pre-cache the full shell so the very first offline boot succeeds.
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+});
+
+self.addEventListener("activate", (e) => {
+  // Purge stale shell versions left over from previous releases.
+  e.waitUntil(caches.keys()
+    .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+    .then(() => self.clients.claim()));
+});
+
+self.addEventListener("fetch", (e) => {
+  if (e.request.method !== "GET") return; // cloud sync POSTs pass straight to network
+  e.respondWith(
+    caches.match(e.request).then((hit) =>
+      hit || fetch(e.request).then((res) => {
+        const clone = res.clone();
+        if (res.ok) caches.open(CACHE).then((c) => c.put(e.request, clone)); // cache-as-you-go
+        return res;
+      }).catch(() => caches.match("./index.html")) // offline deep-link fallback
+    )
+  );
+});
+
+/* Connectivity relay: when the page detects the network returning it posts
+   "flush-sync"; the worker fans that out to every open client so each Store
+   instance flushes its queued syncQueue mutations to the cloud handler. */
+self.addEventListener("message", (e) => {
+  if (e.data === "flush-sync")
+    self.clients.matchAll().then((cl) => cl.forEach((c) => c.postMessage("sync-now")));
+});
+`;
+$("#btnDownloadSW").addEventListener("click", () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([SW_SOURCE], { type: "text/javascript" }));
+  a.download = "sw.js"; a.click(); URL.revokeObjectURL(a.href);
+  toast("sw.js saved — place it beside AquaKeep.html and serve over HTTPS");
+});
+if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+  navigator.serviceWorker.register("sw.js")
+    .then(() => console.info("[AquaKeep] SW active — offline shell locked"))
+    .catch(() => console.info("[AquaKeep] sw.js not deployed yet — Tank Settings → Download sw.js"));
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (e.data === "sync-now") Store.commit("sync", () => {}); // flush queued ops
+  });
+  window.addEventListener("online", () => navigator.serviceWorker.controller?.postMessage("flush-sync"));
+}
+
+</script>
+
+</body>
+</html>
