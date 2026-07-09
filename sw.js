@@ -3,7 +3,7 @@
    answered from cache first (zero-Wi-Fi tankside operation), the network is
    touched only on a cache miss, and successful responses are cached
    as-you-go so the shell heals itself after updates. */
-const CACHE = "aquakeep-shell-v1";
+const CACHE = "aquakeep-shell-v2";
 const SHELL = ["./", "./index.html"];
 
 self.addEventListener("install", (e) => {

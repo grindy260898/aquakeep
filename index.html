@@ -538,6 +538,7 @@ code.k { background: var(--glass-strong); border: 1px solid var(--border-hi);
           </div>
           <div class="field"><label>Filter type</label><input class="inp" id="setFilter" type="text"></div>
           <div class="field"><label>Flow rate (L/h)</label><input class="inp" id="setFlow" type="number" min="0" step="10"></div>
+          <div class="field"><label>Lights on at (hour, 0–23)</label><input class="inp" id="setLightOn" type="number" min="0" max="23" step="1"></div>
         </div>
         <hr style="border:none;border-top:1px dashed rgba(255,255,255,0.08);margin:18px 0">
         <h2>Livestock Configurator</h2>
@@ -758,9 +759,18 @@ code.k { background: var(--glass-strong); border: 1px solid var(--border-hi);
       </div>
       <div class="panel glass col-4">
         <h2>Smart Hardware Listener</h2>
-        <p class="muted">Filtration smart plug — live draw</p>
+        <p class="muted" id="wattLabel">Lights smart plug — live draw</p>
         <div class="watt-meter" id="wattMeter">— W</div>
         <p class="faint" id="wattNote"></p>
+        <div class="mt">
+          <div class="field"><label>Tuya bridge URL</label>
+            <input class="inp" id="plugBridgeUrl" placeholder="http://127.0.0.1:8899/status"></div>
+          <div class="row" style="margin-top:8px">
+            <button class="btn primary" id="btnPlugConnect">Connect Plug</button>
+            <button class="btn" id="btnPlugOff">Disconnect</button>
+          </div>
+          <p class="faint" style="margin-top:6px">Run setup-tuya-bridge.sh once, then Connect with the field empty for the localhost default.</p>
+        </div>
         <div class="mt row">
           <button class="btn danger" id="btnSimFail">Simulate 0W Failure</button>
           <button class="btn" id="btnSimRestore">Restore</button>
@@ -826,7 +836,7 @@ const Store = (() => {
           added_at: Date.now() - 86400000 * 12   // soil age clock for the exhaustion forecast
         },
         hardware_tier: {
-          lighting: { type: "Low-Tech LED", par_output: "Low", photoperiod_hours: 7, smart_plug_integrated: true },
+          lighting: { type: "Low-Tech LED", par_output: "Low", photoperiod_hours: 7, on_hour: 11, smart_plug_integrated: true },
           co2_injection: false,
           filtration: { type: "Canister", brand: "Eheim Ecco 2234", turnover_lph: 500,
             media: ["Coarse Foam", "Ceramic Biological Rings", "Fine Floss"] }
@@ -852,8 +862,8 @@ const Store = (() => {
       maintenanceUntil: 0,       // hardware alarm mute deadline (real clock)
       trendTab: "tds",           // active chart tab
       dayOffset: 0,              // demo time-warp (days)
-      matchLikes: { live: [], plant: [] }, // 🔥 Match shortlist
-      hardware: { filterWatts: 11.2, failed: false, streamUrl: "" },
+      matchLikes: { live: [], plant: [] }, // stocking shortlist
+      hardware: { filterWatts: 11.2, failed: false, streamUrl: "", plugBridge: "", light: null },
       blockerAck: false,
       syncQueue: []              // ops awaiting cloud flush
     };
@@ -868,6 +878,8 @@ const Store = (() => {
     s.berried ??= []; s.events ??= []; s.shock ??= null;
     s.maintenanceUntil ??= 0; s.trendTab ??= "tds"; s.current.ec ??= null;
     s.matchLikes ??= { live: [], plant: [] }; s.hardware.streamUrl ??= "";
+    s.hardware.plugBridge ??= ""; s.hardware.light ??= null;
+    t.hardware_tier.lighting.on_hour ??= 11;
     return s;
   }
   function guessProfile(sp) {
@@ -1568,21 +1580,84 @@ function renderSchedule() {
 }
 
 /* ---- Module 5: IoT ---- */
+/* Photoperiod window derived from configurable lights-on hour. */
+const LightSchedule = {
+  window() { const l = Store.tank().hardware_tier.lighting; const on = l.on_hour ?? 11; return [on, on + l.photoperiod_hours]; },
+  shouldBeOn() {
+    const [a, b] = this.window();
+    const h = new Date().getHours() + new Date().getMinutes() / 60;
+    return h >= a && h < b;
+  }
+};
+
+/* Tuya bridge poller — real wattage from the lights plug every 10 s. */
+const PlugBridge = {
+  timer: null,
+  start() {
+    clearInterval(this.timer);
+    const url = Store.get().hardware.plugBridge;
+    if (!url) return;
+    const poll = async () => {
+      try {
+        const r = await fetch(url, { cache: "no-store" });
+        const d = await r.json();
+        Store.commit("hw", s => {
+          s.hardware.light = { ok: !!d.ok, on: !!d.on, watts: Math.max(0, +d.watts || 0), name: d.name || "lights plug", at: Date.now(), err: d.error };
+          // Real failure detection: 0 W while the photoperiod says lights should be ON.
+          if (d.ok) s.hardware.failed = LightSchedule.shouldBeOn() && (+d.watts || 0) < 1;
+        });
+      } catch {
+        Store.commit("hw", s => { s.hardware.light = { ok: false, err: "bridge unreachable", at: Date.now() }; });
+      }
+    };
+    poll();
+    this.timer = setInterval(poll, 10000);
+  }
+};
+$("#btnPlugConnect").addEventListener("click", () => {
+  const url = $("#plugBridgeUrl").value.trim() || "http://127.0.0.1:8899/status";
+  $("#plugBridgeUrl").value = url;
+  Store.commit("hw", s => { s.hardware.plugBridge = url; });
+  PlugBridge.start();
+  toast("🔌 Polling live plug data every 10 s");
+});
+$("#btnPlugOff").addEventListener("click", () => {
+  Store.commit("hw", s => { s.hardware.plugBridge = ""; s.hardware.light = null; });
+  PlugBridge.start();
+});
+
 function renderIoT(s) {
   const w = $("#wattMeter");
   const muted = MaintenanceMode.active(s);
-  if (s.hardware.failed && !muted) {
+  const live = s.hardware.light;
+  const l = Store.tank().hardware_tier.lighting;
+  const [onH, offH] = LightSchedule.window();
+  const expectOn = LightSchedule.shouldBeOn();
+  if (live && live.ok) {
+    $("#wattLabel").textContent = `${live.name} — LIVE via Tuya bridge`;
+    w.textContent = (live.watts >= 0 ? live.watts.toFixed(1) : "?") + " W";
+    if (s.hardware.failed && !muted) {
+      w.classList.add("dead");
+      $("#wattNote").innerHTML = `<strong style="color:#FF4A4A">CRITICAL — 0 W but the photoperiod window (${onH}:00–${offH}:00) says lights should be ON. Check the plug/light.</strong>`;
+    } else {
+      w.classList.remove("dead");
+      $("#wattNote").innerHTML = `Plug is <strong>${live.on ? "ON" : "OFF"}</strong> · schedule expects <strong>${expectOn ? "ON" : "OFF"}</strong> ${live.on === expectOn ? "✓ in sync" : "⚠ out of sync with schedule"}${muted && s.hardware.failed ? ` · 🧤 alarm muted ${MaintenanceMode.remainingMin(s)}m` : ""}`;
+    }
+  } else if (live && !live.ok) {
+    $("#wattLabel").textContent = "Lights smart plug — bridge error";
+    w.textContent = "— W"; w.classList.remove("dead");
+    $("#wattNote").innerHTML = `⚠ ${live.err || "no data"} — is the bridge running? Check ~/.aquakeep/tuya.log`;
+  } else if (s.hardware.failed && !muted) {
     w.textContent = "0.0 W"; w.classList.add("dead");
-    $("#wattNote").innerHTML = `<strong style="color:#FF4A4A">CRITICAL — zero draw during peak cycle. Canister pump failure suspected. Livestock O₂ window: ~6 h.</strong>`;
+    $("#wattNote").innerHTML = `<strong style="color:#FF4A4A">CRITICAL — zero draw during peak cycle (simulated). Connect the Tuya bridge for real monitoring.</strong>`;
   } else if (s.hardware.failed && muted) {
     w.textContent = "0.0 W"; w.classList.remove("dead");
-    $("#wattNote").innerHTML = `🧤 0 W detected but <strong>maintenance mode is muting alarms</strong> for ${MaintenanceMode.remainingMin(s)} more min. Alarms re-arm automatically.`;
+    $("#wattNote").innerHTML = `🧤 0 W detected but <strong>maintenance mode is muting alarms</strong> for ${MaintenanceMode.remainingMin(s)} more min.`;
   } else {
     w.textContent = s.hardware.filterWatts.toFixed(1) + " W"; w.classList.remove("dead");
-    $("#wattNote").textContent = "Nominal draw for Eheim Ecco 2234 (rated 8–15 W).";
+    $("#wattNote").textContent = "Simulated reading — connect the Tuya bridge below for the real plug.";
   }
-  const l = Store.tank().hardware_tier.lighting;
-  $("#plugSched").innerHTML = `💡 Lighting: ON 11:00 → OFF ${11 + l.photoperiod_hours}:00 (${l.photoperiod_hours} h photoperiod) · smart plug ${l.smart_plug_integrated ? "linked ✓" : "not linked"}`;
+  $("#plugSched").innerHTML = `💡 Lighting: ON ${onH}:00 → OFF ${offH}:00 (${l.photoperiod_hours} h photoperiod) · currently expected <strong>${expectOn ? "ON" : "OFF"}</strong> · ${live?.ok ? `plug reports <strong>${live.on ? "ON" : "OFF"}</strong>` : "plug not linked"}`;
 }
 $("#btnSimFail").addEventListener("click", () => {
   Store.commit("hw", s => { s.hardware.failed = true; });
@@ -1834,6 +1909,10 @@ function bootSettings() {
     Store.commit("cfg", s => s.universal_tank_instance.hardware_tier.filtration.type = e.target.value));
   $("#setFlow").addEventListener("change", e =>
     Store.commit("cfg", s => s.universal_tank_instance.hardware_tier.filtration.turnover_lph = Math.max(0, parseFloat(e.target.value) || 0)));
+  $("#setLightOn").value = t.hardware_tier.lighting.on_hour ?? 11;
+  $("#setLightOn").addEventListener("change", e =>
+    Store.commit("cfg", s => s.universal_tank_instance.hardware_tier.lighting.on_hour =
+      Math.min(23, Math.max(0, parseInt(e.target.value) || 11))));
   $("#btnAddSpecies").addEventListener("click", () => {
     const x = SPECIES_DB[+$("#addSpecies").value];
     if (!x) return;
@@ -2331,6 +2410,8 @@ bootFlora();
 bootPlantDoctor();
 drawVis();
 $("#streamUrl").value = Store.get().hardware.streamUrl || "";
+$("#plugBridgeUrl").value = Store.get().hardware.plugBridge || "";
+PlugBridge.start();
 renderAll();
 /* Background tick: decay phases, gestation bars, maintenance countdown — every 30 s. */
 setInterval(renderAll, 30000);
@@ -2373,7 +2454,7 @@ const SW_SOURCE = `/* AquaKeep service worker — Cache First, Network Fallback.
    answered from cache first (zero-Wi-Fi tankside operation), the network is
    touched only on a cache miss, and successful responses are cached
    as-you-go so the shell heals itself after updates. */
-const CACHE = "aquakeep-shell-v1";
+const CACHE = "aquakeep-shell-v2";
 const SHELL = ["./", "./index.html"];
 
 self.addEventListener("install", (e) => {
